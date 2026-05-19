@@ -18,6 +18,7 @@
 #include <esp_timer.h>
 #include <algorithm>
 #include "stackchan_camera.h"
+#include "face_wake_service.h"
 #include "hal_bridge.h"
 
 #define TAG "M5Stack-StackChan-Board"
@@ -245,6 +246,7 @@ private:
     StackChanCamera* camera_;
     esp_timer_handle_t touchpad_timer_;
     PowerSaveTimer* power_save_timer_;
+    FaceWakeService* face_wake_service_ = nullptr;
     hal_bridge::XiaozhiConfig_t xiaozhi_config_;
     bool last_power_save_enabled_      = false;
     int64_t last_power_state_check_ms_ = 0;
@@ -488,6 +490,8 @@ private:
 
         camera_ = new StackChanCamera(video_config);
         camera_->SetHMirror(false);
+        face_wake_service_ = new FaceWakeService(camera_);
+        face_wake_service_->Start();
     }
 
 public:

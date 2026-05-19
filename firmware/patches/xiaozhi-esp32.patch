@@ -1,8 +1,27 @@
 diff --git a/main/application.cc b/main/application.cc
-index d69d43d..3b6f07e 100644
+index d69d43d..97b06e0 100644
 --- a/main/application.cc
 +++ b/main/application.cc
-@@ -610,33 +610,36 @@ void Application::InitializeProtocol() {
+@@ -178,6 +178,7 @@ void Application::Run() {
+         MAIN_EVENT_TOGGLE_CHAT |
+         MAIN_EVENT_START_LISTENING |
+         MAIN_EVENT_STOP_LISTENING |
++        MAIN_EVENT_STOP_CONVERSATION |
+         MAIN_EVENT_ACTIVATION_DONE |
+         MAIN_EVENT_STATE_CHANGED;
+ 
+@@ -217,6 +218,10 @@ void Application::Run() {
+             HandleStopListeningEvent();
+         }
+ 
++        if (bits & MAIN_EVENT_STOP_CONVERSATION) {
++            HandleStopConversationEvent();
++        }
++
+         if (bits & MAIN_EVENT_SEND_AUDIO) {
+             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
+@@ -610,33 +615,36 @@ void Application::InitializeProtocol() {
  }
  
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -66,6 +85,102 @@ index d69d43d..3b6f07e 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
+@@ -671,6 +679,10 @@ void Application::StopListening() {
+     xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING);
+ }
+ 
++void Application::StopConversation() {
++    xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_CONVERSATION);
++}
++
+ void Application::HandleToggleChatEvent() {
+     auto state = GetDeviceState();
+     
+@@ -718,6 +730,8 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+ 
+     if (!protocol_->IsAudioChannelOpened()) {
+         if (!protocol_->OpenAudioChannel()) {
++            ESP_LOGE(TAG, "Failed to open audio channel");
++            SetDeviceState(kDeviceStateIdle);
+             return;
+         }
+     }
+@@ -773,6 +787,29 @@ void Application::HandleStopListeningEvent() {
+     }
+ }
+ 
++void Application::HandleStopConversationEvent() {
++    auto state = GetDeviceState();
++
++    if (!protocol_) {
++        return;
++    }
++
++    if (state == kDeviceStateListening) {
++        protocol_->SendStopListening();
++        protocol_->CloseAudioChannel();
++        SetDeviceState(kDeviceStateIdle);
++    } else if (state == kDeviceStateSpeaking) {
++        AbortSpeaking(kAbortReasonNone);
++        protocol_->CloseAudioChannel();
++        SetDeviceState(kDeviceStateIdle);
++    } else if (state == kDeviceStateConnecting) {
++        if (protocol_->IsAudioChannelOpened()) {
++            protocol_->CloseAudioChannel();
++        }
++        SetDeviceState(kDeviceStateIdle);
++    }
++}
++
+ void Application::HandleWakeWordDetectedEvent() {
+     if (!protocol_) {
+         return;
+@@ -827,6 +864,8 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
+ 
+     if (!protocol_->IsAudioChannelOpened()) {
+         if (!protocol_->OpenAudioChannel()) {
++            ESP_LOGE(TAG, "Failed to open audio channel");
++            SetDeviceState(kDeviceStateIdle);
+             audio_service_.EnableWakeWordDetection(true);
+             return;
+         }
+@@ -1116,4 +1155,3 @@ void Application::ResetProtocol() {
+         protocol_.reset();
+     });
+ }
+-
+diff --git a/main/application.h b/main/application.h
+index 7ca7af4..be207ba 100644
+--- a/main/application.h
++++ b/main/application.h
+@@ -31,6 +31,7 @@
+ #define MAIN_EVENT_START_LISTENING      (1 << 10)
+ #define MAIN_EVENT_STOP_LISTENING       (1 << 11)
+ #define MAIN_EVENT_STATE_CHANGED        (1 << 12)
++#define MAIN_EVENT_STOP_CONVERSATION    (1 << 13)
+ 
+ 
+ enum AecMode {
+@@ -103,6 +104,11 @@ public:
+      */
+     void StopListening();
+ 
++    /**
++     * Stop the current conversation and close the audio channel (event-based, thread-safe)
++     */
++    void StopConversation();
++
+     void Reboot();
+     void WakeWordInvoke(const std::string& wake_word);
+     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
+@@ -149,6 +155,7 @@ private:
+     void HandleToggleChatEvent();
+     void HandleStartListeningEvent();
+     void HandleStopListeningEvent();
++    void HandleStopConversationEvent();
+     void HandleNetworkConnectedEvent();
+     void HandleNetworkDisconnectedEvent();
+     void HandleActivationDoneEvent();
 diff --git a/main/assets.cc b/main/assets.cc
 index ad61944..6b84daf 100644
 --- a/main/assets.cc
@@ -245,6 +360,128 @@ index 3692e0c..7bfbc5c 100644
      
      // Strategy instance
      std::unique_ptr<AssetStrategy> strategy_;
+diff --git a/main/audio/audio_service.cc b/main/audio/audio_service.cc
+index 350ac58..ccf4c5f 100644
+--- a/main/audio/audio_service.cc
++++ b/main/audio/audio_service.cc
+@@ -1,5 +1,6 @@
+ #include "audio_service.h"
+ #include <esp_log.h>
++#include <algorithm>
+ #include <cstring>
+ 
+ #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)        \
+@@ -498,7 +499,32 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
+         timestamp_queue_.pop_front();
+     }
+ 
+-    audio_queue_cv_.wait(lock, [this]() { return audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE; });
++    if (type == kAudioTaskTypeEncodeToSendQueue && audio_encode_queue_.size() >= MAX_ENCODE_TASKS_IN_QUEUE) {
++        static int64_t last_drop_log_time = 0;
++        auto drop_it = std::find_if(audio_encode_queue_.begin(), audio_encode_queue_.end(),
++            [](const auto& queued_task) {
++                return queued_task->type == kAudioTaskTypeEncodeToSendQueue;
++            });
++        if (drop_it != audio_encode_queue_.end()) {
++            audio_encode_queue_.erase(drop_it);
++        } else {
++            const int64_t now = esp_timer_get_time();
++            if (now - last_drop_log_time > 1000000) {
++                ESP_LOGW(TAG, "Audio encode queue is full, dropping live microphone frame");
++                last_drop_log_time = now;
++            }
++            return;
++        }
++
++        const int64_t now = esp_timer_get_time();
++        if (now - last_drop_log_time > 1000000) {
++            ESP_LOGW(TAG, "Audio encode queue is full, dropping oldest live microphone frame");
++            last_drop_log_time = now;
++        }
++    } else {
++        audio_queue_cv_.wait(lock, [this]() { return audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE; });
++    }
++
+     audio_encode_queue_.push_back(std::move(task));
+     audio_queue_cv_.notify_all();
+ }
+diff --git a/main/audio/processors/afe_audio_processor.cc b/main/audio/processors/afe_audio_processor.cc
+index 15e9cc5..25f13c3 100644
+--- a/main/audio/processors/afe_audio_processor.cc
++++ b/main/audio/processors/afe_audio_processor.cc
+@@ -1,5 +1,6 @@
+ #include "afe_audio_processor.h"
+ #include <esp_log.h>
++#include <esp_heap_caps.h>
+ 
+ #define PROCESSOR_RUNNING 0x01
+ 
+@@ -67,17 +68,45 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
+     afe_iface_ = esp_afe_handle_from_config(afe_config);
+     afe_data_ = afe_iface_->create_from_config(afe_config);
+     
+-    xTaskCreate([](void* arg) {
++    const size_t stack_size = 4096 * 2;
++    if (audio_processor_task_stack_ == nullptr) {
++        audio_processor_task_stack_ = (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
++    }
++    if (audio_processor_task_buffer_ == nullptr) {
++        audio_processor_task_buffer_ = (StaticTask_t*)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
++    }
++
++    if (audio_processor_task_stack_ == nullptr || audio_processor_task_buffer_ == nullptr) {
++        ESP_LOGE(TAG, "Failed to allocate audio processor task stack=%p buffer=%p",
++                 audio_processor_task_stack_, audio_processor_task_buffer_);
++        return;
++    }
++
++    audio_processor_task_ = xTaskCreateStaticPinnedToCore([](void* arg) {
+         auto this_ = (AfeAudioProcessor*)arg;
+         this_->AudioProcessorTask();
+         vTaskDelete(NULL);
+-    }, "audio_communication", 4096, this, 3, NULL);
++    }, "audio_communication", stack_size, this, 9, audio_processor_task_stack_, audio_processor_task_buffer_, 1);
++
++    if (audio_processor_task_ == nullptr) {
++        ESP_LOGE(TAG, "Failed to create audio processor task");
++    }
+ }
+ 
+ AfeAudioProcessor::~AfeAudioProcessor() {
++    if (audio_processor_task_ != nullptr) {
++        vTaskDelete(audio_processor_task_);
++        audio_processor_task_ = nullptr;
++    }
+     if (afe_data_ != nullptr) {
+         afe_iface_->destroy(afe_data_);
+     }
++    if (audio_processor_task_stack_ != nullptr) {
++        heap_caps_free(audio_processor_task_stack_);
++    }
++    if (audio_processor_task_buffer_ != nullptr) {
++        heap_caps_free(audio_processor_task_buffer_);
++    }
+     vEventGroupDelete(event_group_);
+ }
+ 
+diff --git a/main/audio/processors/afe_audio_processor.h b/main/audio/processors/afe_audio_processor.h
+index fe2f025..05f9ed3 100644
+--- a/main/audio/processors/afe_audio_processor.h
++++ b/main/audio/processors/afe_audio_processor.h
+@@ -41,8 +41,11 @@ private:
+     std::vector<int16_t> input_buffer_;
+     std::mutex input_buffer_mutex_;
+     std::vector<int16_t> output_buffer_;
++    TaskHandle_t audio_processor_task_ = nullptr;
++    StaticTask_t* audio_processor_task_buffer_ = nullptr;
++    StackType_t* audio_processor_task_stack_ = nullptr;
+ 
+     void AudioProcessorTask();
+ };
+ 
+-#endif 
+\ No newline at end of file
++#endif 
 diff --git a/main/boards/common/i2c_device.cc b/main/boards/common/i2c_device.cc
 index 835997d..ea50d51 100644
 --- a/main/boards/common/i2c_device.cc

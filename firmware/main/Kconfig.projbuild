@@ -849,6 +849,60 @@ menu "Camera Configuration"
             Enable camera debug mode, print camera debug information to the console.
             Only works on boards that support camera.
 
+    menuconfig STACKCHAN_FACE_WAKE_ENABLE
+        bool "Enable StackChan face-triggered conversation"
+        default y
+        depends on BOARD_TYPE_M5STACK_STACK_CHAN && IDF_TARGET_ESP32S3
+        help
+            Use the CoreS3 camera and ESP-DL human face detection model to start
+            conversation while a face is present, then stop after the face disappears.
+
+    if STACKCHAN_FACE_WAKE_ENABLE
+        config STACKCHAN_FACE_WAKE_INTERVAL_MS
+            int "Face detection interval (ms)"
+            default 500
+            range 200 5000
+            help
+                Delay between face detection attempts while idle.
+
+        config STACKCHAN_FACE_WAKE_ACTIVE_INTERVAL_MS
+            int "Face wake idle delay during conversation (ms)"
+            default 5000
+            range 1000 30000
+            help
+                Delay while the conversation is active. Face detection is paused during
+                audio processing so the AFE fetch task can keep up with the input stream.
+
+        config STACKCHAN_FACE_WAKE_ON_CONSECUTIVE_FRAMES
+            int "Frames required before conversation starts"
+            default 2
+            range 1 10
+            help
+                Number of consecutive frames with a face before starting conversation.
+
+        config STACKCHAN_FACE_WAKE_OFF_TIMEOUT_MS
+            int "Face missing timeout before conversation stops (ms)"
+            default 10000
+            range 500 30000
+            help
+                Time without a detected face before stopping conversation.
+
+        config STACKCHAN_FACE_WAKE_MIN_SCORE
+            int "Minimum face detection score percent"
+            default 60
+            range 1 99
+            help
+                Minimum detection score as a percentage.
+
+        config STACKCHAN_FACE_WAKE_CENTER_TOLERANCE_PERCENT
+            int "Centered face tolerance percent"
+            default 45
+            range 5 50
+            help
+                Maximum horizontal and vertical distance from the frame center,
+                as a percentage of frame size, for a face to start conversation.
+    endif
+
     config XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP
         bool "Enable software camera buffer endianness swapping"
         default n

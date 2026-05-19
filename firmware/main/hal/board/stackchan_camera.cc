@@ -394,6 +394,8 @@ void StackChanCamera::SetExplainUrl(const std::string& url, const std::string& t
 
 bool StackChanCamera::Capture()
 {
+    std::lock_guard<std::mutex> lock(capture_mutex_);
+
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
     }
@@ -853,6 +855,8 @@ bool StackChanCamera::Capture()
 
 bool StackChanCamera::StreamCaptures()
 {
+    std::lock_guard<std::mutex> lock(capture_mutex_);
+
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
     }
