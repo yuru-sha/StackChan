@@ -15,6 +15,12 @@ file(GLOB_RECURSE STACK_CHAN_SOURCES
     "stackchan/*.cc"
     "stackchan/*.cpp"
 )
+list(APPEND STACK_CHAN_SOURCES
+    "stackchan/avatar/skins/robot/robot.cpp"
+    "stackchan/avatar/skins/robot/eyes.cpp"
+    "stackchan/avatar/skins/robot/mouth.cpp"
+)
+list(REMOVE_DUPLICATES STACK_CHAN_SOURCES)
 set(STACK_CHAN_INCLUDE_DIRS 
     "."
 )
