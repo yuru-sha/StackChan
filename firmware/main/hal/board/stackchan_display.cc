@@ -179,6 +179,19 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
     };
     esp_timer_create(&preview_timer_args, &preview_timer_);
 
+    esp_timer_create_args_t notification_timer_args = {
+        .callback =
+            [](void* arg) {
+                StackChanAvatarDisplay* display = static_cast<StackChanAvatarDisplay*>(arg);
+                display->HideNotification();
+            },
+        .arg                   = this,
+        .dispatch_method       = ESP_TIMER_TASK,
+        .name                  = "notification_timer",
+        .skip_unhandled_events = false,
+    };
+    esp_timer_create(&notification_timer_args, &notification_timer_);
+
     // Create boot logo label if not warm boot
     if (GetHAL().getWarmRebootTarget() < 0) {
         ESP_LOGI(TAG, "Create boot logo label");
@@ -201,6 +214,11 @@ StackChanAvatarDisplay::~StackChanAvatarDisplay()
     if (preview_timer_ != nullptr) {
         esp_timer_stop(preview_timer_);
         esp_timer_delete(preview_timer_);
+    }
+
+    if (notification_timer_ != nullptr) {
+        esp_timer_stop(notification_timer_);
+        esp_timer_delete(notification_timer_);
     }
 
     if (preview_image_ != nullptr) {
@@ -561,6 +579,30 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     }
 }
 
+void StackChanAvatarDisplay::HideNotification()
+{
+    auto& stackchan = GetStackChan();
+    if (!stackchan.hasAvatar()) {
+        return;
+    }
+
+    DisplayLockGuard lock(this);
+    stackchan.avatar().clearSpeech();
+}
+
 void StackChanAvatarDisplay::ShowNotification(const char* notification, int duration_ms)
 {
+    auto& stackchan = GetStackChan();
+    if (!stackchan.hasAvatar()) {
+        ESP_LOGW(TAG, "ShowNotification called before avatar is ready");
+        return;
+    }
+
+    DisplayLockGuard lock(this);
+    stackchan.avatar().setSpeech(notification ? notification : "");
+
+    if (notification_timer_ != nullptr) {
+        esp_timer_stop(notification_timer_);
+        ESP_ERROR_CHECK(esp_timer_start_once(notification_timer_, duration_ms * 1000));
+    }
 }

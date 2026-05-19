@@ -16,6 +16,7 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_ili9341.h>
 #include <esp_timer.h>
+#include <cstdio>
 #include <algorithm>
 #include "stackchan_camera.h"
 #include "face_wake_service.h"
@@ -24,6 +25,11 @@
 #define TAG "M5Stack-StackChan-Board"
 
 #define XPOWERS_AXP2101_ICC_CHG_SET (0x62)
+#define XPOWERS_AXP2101_IRQ_ENABLE1 (0x41)
+#define XPOWERS_AXP2101_IRQ_STATUS0 (0x48)
+#define XPOWERS_AXP2101_IRQ_STATUS1 (0x49)
+#define XPOWERS_AXP2101_IRQ_STATUS2 (0x4A)
+#define XPOWERS_AXP2101_IRQ_POWERON_SHORT_PRESS (1 << 3)
 
 class Pmic : public Axp2101 {
 public:
@@ -70,6 +76,7 @@ public:
         }
 
         SetBrightness(0);
+        EnablePowerButtonShortPressIrq();
     }
 
     void SetBrightness(uint8_t brightness)
@@ -124,6 +131,31 @@ public:
         // Treat any non-discharging state as externally powered so a plugged-in cable
         // still counts even after the battery is full.
         return current_direction != 2 || is_charging_done;
+    }
+
+    void EnablePowerButtonShortPressIrq()
+    {
+        uint8_t enable = ReadReg(XPOWERS_AXP2101_IRQ_ENABLE1);
+        WriteReg(XPOWERS_AXP2101_IRQ_ENABLE1, enable | XPOWERS_AXP2101_IRQ_POWERON_SHORT_PRESS);
+        ClearIrqStatuses();
+    }
+
+    void ClearIrqStatuses()
+    {
+        WriteReg(XPOWERS_AXP2101_IRQ_STATUS0, 0xFF);
+        WriteReg(XPOWERS_AXP2101_IRQ_STATUS1, 0xFF);
+        WriteReg(XPOWERS_AXP2101_IRQ_STATUS2, 0xFF);
+    }
+
+    bool WasPowerButtonShortPressed()
+    {
+        const uint8_t status = ReadReg(XPOWERS_AXP2101_IRQ_STATUS1) & 0x0C;
+        if (status == 0) {
+            return false;
+        }
+
+        WriteReg(XPOWERS_AXP2101_IRQ_STATUS1, status);
+        return (status & XPOWERS_AXP2101_IRQ_POWERON_SHORT_PRESS) != 0;
     }
 };
 
@@ -237,6 +269,7 @@ class M5StackCoreS3Board : public WifiBoard {
 private:
     static constexpr int kPowerSaveSleepDelaySeconds = 300;
     static constexpr int kPowerStatePollIntervalMs   = 1000;
+    static constexpr int kPowerButtonPollIntervalMs  = 100;
 
     i2c_master_bus_handle_t i2c_bus_;
     Pmic* pmic_;
@@ -250,6 +283,7 @@ private:
     hal_bridge::XiaozhiConfig_t xiaozhi_config_;
     bool last_power_save_enabled_      = false;
     int64_t last_power_state_check_ms_ = 0;
+    int64_t last_power_button_check_ms_ = 0;
 
     bool ShouldEnablePowerSave(bool has_external_power, bool is_discharging) const
     {
@@ -279,6 +313,40 @@ private:
         last_power_state_check_ms_ = now_ms;
 
         UpdatePowerSaveEnabled(pmic_->IsExternalPowerConnected(), pmic_->IsDischarging());
+    }
+
+    void PollPowerButton()
+    {
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        if (last_power_button_check_ms_ != 0 &&
+            (now_ms - last_power_button_check_ms_) < kPowerButtonPollIntervalMs) {
+            return;
+        }
+        last_power_button_check_ms_ = now_ms;
+
+        if (face_wake_service_ == nullptr || !pmic_->WasPowerButtonShortPressed()) {
+            return;
+        }
+
+        auto& app = Application::GetInstance();
+        const auto state = app.GetDeviceState();
+        if (state != kDeviceStateIdle && state != kDeviceStateConnecting && state != kDeviceStateListening &&
+            state != kDeviceStateSpeaking) {
+            ESP_LOGD(TAG, "Ignoring power button event while device state is %d", state);
+            return;
+        }
+
+        const bool enabled = face_wake_service_->ToggleEnabled();
+        if (!enabled &&
+            (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking)) {
+            ESP_LOGI(TAG, "Stopping active conversation because face wake was disabled");
+            app.StopConversation();
+        }
+
+        char message[32];
+        snprintf(message, sizeof(message), "Face wake %s", enabled ? "ON" : "OFF");
+        ESP_LOGI(TAG, "%s", message);
+        GetDisplay()->ShowNotification(message, 2000);
     }
 
     void InitializePowerSaveTimer()
@@ -385,6 +453,7 @@ private:
                     M5StackCoreS3Board* board = (M5StackCoreS3Board*)arg;
                     board->PollTouchpad();
                     board->PollPowerSaveState();
+                    board->PollPowerButton();
                 },
             .arg                   = this,
             .dispatch_method       = ESP_TIMER_TASK,

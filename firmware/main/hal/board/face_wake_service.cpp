@@ -6,6 +6,7 @@
 #include "hal_bridge.h"
 #include "human_face_detect.hpp"
 #include "linux/videodev2.h"
+#include "settings.h"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -21,6 +22,8 @@
 
 namespace {
 constexpr const char* TAG = "FaceWakeService";
+constexpr const char* SETTINGS_NS = "stackchan";
+constexpr const char* FACE_WAKE_ENABLED_KEY = "face_wake";
 
 struct HeapCapsDeleter {
     void operator()(uint8_t* ptr) const
@@ -84,6 +87,8 @@ bool IsCenteredFace(const dl::detect::result_t& result, uint16_t width, uint16_t
 
 FaceWakeService::FaceWakeService(StackChanCamera* camera) : camera_(camera)
 {
+    Settings settings(SETTINGS_NS);
+    enabled_.store(settings.GetBool(FACE_WAKE_ENABLED_KEY, true), std::memory_order_relaxed);
 }
 
 FaceWakeService::~FaceWakeService()
@@ -107,6 +112,34 @@ void FaceWakeService::Start()
     }
 }
 
+void FaceWakeService::SetEnabled(bool enabled)
+{
+    const bool previous = enabled_.exchange(enabled, std::memory_order_relaxed);
+    if (previous == enabled) {
+        return;
+    }
+
+    if (!enabled) {
+        ResetState();
+    }
+
+    Settings settings(SETTINGS_NS, true);
+    settings.SetBool(FACE_WAKE_ENABLED_KEY, enabled);
+    ESP_LOGI(TAG, "Face wake %s", enabled ? "enabled" : "disabled");
+}
+
+bool FaceWakeService::IsEnabled() const
+{
+    return enabled_.load(std::memory_order_relaxed);
+}
+
+bool FaceWakeService::ToggleEnabled()
+{
+    const bool enabled = !IsEnabled();
+    SetEnabled(enabled);
+    return enabled;
+}
+
 void FaceWakeService::TaskEntry(void* arg)
 {
     static_cast<FaceWakeService*>(arg)->Run();
@@ -117,6 +150,12 @@ void FaceWakeService::Run()
     ESP_LOGI(TAG, "Face wake task started");
 
     while (true) {
+        if (!IsEnabled()) {
+            ResetState();
+            vTaskDelay(pdMS_TO_TICKS(CONFIG_STACKCHAN_FACE_WAKE_INTERVAL_MS));
+            continue;
+        }
+
         auto& app = Application::GetInstance();
         const auto state = app.GetDeviceState();
         const bool audio_active = IsConversationState(state);
@@ -127,9 +166,12 @@ void FaceWakeService::Run()
             continue;
         }
 
-        if (face_present_) {
-            face_present_ = false;
-            consecutive_face_frames_ = 0;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (face_present_) {
+                face_present_ = false;
+                consecutive_face_frames_ = 0;
+            }
         }
 
         const bool detected = DetectFace();
@@ -137,6 +179,14 @@ void FaceWakeService::Run()
         UpdateConversation(detected, now_ms);
         vTaskDelay(GetDetectionDelayTicks(audio_active));
     }
+}
+
+void FaceWakeService::ResetState()
+{
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    face_present_ = false;
+    consecutive_face_frames_ = 0;
+    last_face_time_ms_ = 0;
 }
 
 bool FaceWakeService::DetectFace()
@@ -193,6 +243,7 @@ bool FaceWakeService::DetectFace()
 
 void FaceWakeService::UpdateConversation(bool detected, int64_t now_ms)
 {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     auto& app = Application::GetInstance();
     const auto state = app.GetDeviceState();
 
