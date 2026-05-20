@@ -13,6 +13,11 @@ static const std::string_view _tag = "HAL-OTA";
 
 bool Hal::updateFirmware(std::function<void(std::string_view)> onLog)
 {
+#if CONFIG_DISABLE_OFFICIAL_FIRMWARE_UPDATE
+    mclog::tagInfo(_tag, "official firmware OTA updates are disabled by configuration");
+    onLog("Official firmware updates are disabled");
+    return true;
+#else
     onLog("Checking firmware updates...");
 
     Ota ota;
@@ -73,4 +78,5 @@ bool Hal::updateFirmware(std::function<void(std::string_view)> onLog)
     vTaskDelay(pdMS_TO_TICKS(1000));
     reboot();
     return true;
+#endif
 }

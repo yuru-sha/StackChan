@@ -1,5 +1,12 @@
 menu "Xiaozhi Assistant"
 
+config DISABLE_OFFICIAL_FIRMWARE_UPDATE
+    bool "Disable official firmware OTA updates"
+    default y
+    help
+        Disable the built-in official firmware update path so locally customized
+        firmware is not overwritten by an OTA update.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"
