@@ -1,2 +1,6 @@
 .DS_Store
 .idea/
+
+# Flutter generated files
+/app/.dart_tool/
+/app/.flutter-plugins-dependencies

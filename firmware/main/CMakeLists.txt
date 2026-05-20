@@ -315,6 +315,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp-now
                         mooncake
                         mooncake_log
+                        m5unified
                         smooth_ui_toolkit
                     )
 
