@@ -269,13 +269,21 @@ void StackChanAvatarDisplay::SetupUI()
 
     ESP_LOGI(TAG, "Creating Stack-chan Avatar...");
 
-    auto avatar = std::make_unique<DefaultAvatar>();
+    auto avatar = std::make_unique<RobotAvatar>();
     avatar->init(lv_screen_active());
-    avatar->getPanel()->onClick().connect([]() {
-        if (hal_bridge::is_xiaozhi_ready()) {
-            hal_bridge::toggle_xiaozhi_chat_state();
+    auto toggle_chat_from_touch = [](lv_event_t* e) {
+        static uint32_t last_toggle_ms = 0;
+        uint32_t now                  = lv_tick_get();
+        if (now - last_toggle_ms < 600) {
+            return;
         }
-    });
+        last_toggle_ms = now;
+
+        ESP_LOGI(TAG, "Avatar panel touched, toggling Xiaozhi chat state");
+        hal_bridge::toggle_xiaozhi_chat_state();
+    };
+    avatar->getPanel()->addFlag(LV_OBJ_FLAG_CLICKABLE);
+    avatar->getPanel()->addEventCb(toggle_chat_from_touch, LV_EVENT_RELEASED);
 
     stackchan.attachAvatar(std::move(avatar));
     stackchan.addModifier(std::make_unique<BreathModifier>());
