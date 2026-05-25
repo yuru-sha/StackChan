@@ -5,6 +5,7 @@
  */
 #include "hal_bridge.h"
 #include "stackchan_display.h"
+#include <apps/app_ai_agent/face_detect_wakeup.h>
 #include <esp_log.h>
 #include <esp_err.h>
 #include <nvs.h>
@@ -115,6 +116,7 @@ void start_xiaozhi_app()
     // Initialize and run the application
     auto& app = Application::GetInstance();
     app.Initialize();
+    ai_agent::start_face_detect_wakeup();
     app.Run();  // This function runs the main event loop and never returns
 }
 

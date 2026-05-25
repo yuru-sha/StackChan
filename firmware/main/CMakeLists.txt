@@ -289,6 +289,11 @@ if(CONFIG_IDF_TARGET_ESP32S3)
     list(APPEND SOURCES "${XIAOZHI_MAIN_DIR}/boards/common/esp32_camera.cc")
 endif()
 
+set(STACK_CHAN_OPTIONAL_PRIV_REQUIRES)
+if(CONFIG_IDF_TARGET_ESP32S3)
+    list(APPEND STACK_CHAN_OPTIONAL_PRIV_REQUIRES human_face_detect)
+endif()
+
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
@@ -316,6 +321,7 @@ idf_component_register(SRCS ${SOURCES}
                         mooncake
                         mooncake_log
                         smooth_ui_toolkit
+                        ${STACK_CHAN_OPTIONAL_PRIV_REQUIRES}
                     )
 
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME
