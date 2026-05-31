@@ -88,9 +88,24 @@ static bool convert_yuyv_to_rgb565(const uint8_t* src, size_t src_len, uint16_t*
         const uint8_t v  = src[i + 3];
 
         yuv_to_rgb(y0, u, v, r, g, b);
-        dst[out] = rgb888_to_rgb565(r, g, b);
+        dst[out] = __builtin_bswap16(rgb888_to_rgb565(r, g, b));
         yuv_to_rgb(y1, u, v, r, g, b);
-        dst[out + 1] = rgb888_to_rgb565(r, g, b);
+        dst[out + 1] = __builtin_bswap16(rgb888_to_rgb565(r, g, b));
+    }
+
+    return true;
+}
+
+static bool copy_rgb565_as_big_endian(const uint8_t* src, size_t src_len, uint16_t* dst, int width, int height)
+{
+    const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (src == nullptr || dst == nullptr || src_len < pixel_count * 2) {
+        return false;
+    }
+
+    auto src16 = reinterpret_cast<const uint16_t*>(src);
+    for (size_t i = 0; i < pixel_count; ++i) {
+        dst[i] = __builtin_bswap16(src16[i]);
     }
 
     return true;
@@ -190,6 +205,7 @@ static void face_detect_wakeup_task(void*)
     size_t rgb565_buffer_len = 0;
     TickType_t last_wake_tick = 0;
     int consecutive_hits = 0;
+    bool logged_frame_info = false;
     FaceDetectionSummary previous_detection;
 
     mclog::tagInfo(kTag, "face detect wakeup task started");
@@ -211,6 +227,22 @@ static void face_detect_wakeup_task(void*)
         const int width = camera->GetFrameWidth();
         const int height = camera->GetFrameHeight();
         const int format = camera->GetFrameFormat();
+        if (!logged_frame_info) {
+            mclog::tagInfo(kTag, "camera frame: {}x{}, len={}, format=0x{:08X}", width, height, frame_len,
+                           static_cast<uint32_t>(format));
+            logged_frame_info = true;
+        }
+
+        const size_t required_len = static_cast<size_t>(width) * static_cast<size_t>(height) * 2;
+        if (rgb565_buffer_len < required_len) {
+            if (rgb565_buffer != nullptr) {
+                heap_caps_free(rgb565_buffer);
+                rgb565_buffer = nullptr;
+            }
+            rgb565_buffer =
+                static_cast<uint8_t*>(heap_caps_malloc(required_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            rgb565_buffer_len = rgb565_buffer == nullptr ? 0 : required_len;
+        }
 
         dl::image::img_t img = {
             .data = nullptr,
@@ -220,19 +252,14 @@ static void face_detect_wakeup_task(void*)
         };
 
         if (format == V4L2_PIX_FMT_RGB565) {
-            img.data = const_cast<uint8_t*>(frame_data);
-        } else if (format == V4L2_PIX_FMT_YUYV) {
-            const size_t required_len = static_cast<size_t>(width) * static_cast<size_t>(height) * 2;
-            if (rgb565_buffer_len < required_len) {
-                if (rgb565_buffer != nullptr) {
-                    heap_caps_free(rgb565_buffer);
-                    rgb565_buffer = nullptr;
-                }
-                rgb565_buffer = static_cast<uint8_t*>(
-                    heap_caps_malloc(required_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-                rgb565_buffer_len = rgb565_buffer == nullptr ? 0 : required_len;
+            if (rgb565_buffer == nullptr ||
+                !copy_rgb565_as_big_endian(frame_data, frame_len, reinterpret_cast<uint16_t*>(rgb565_buffer), width, height)) {
+                mclog::tagError(kTag, "failed to prepare RGB565 frame for detection");
+                vTaskDelay(pdMS_TO_TICKS(kUnsupportedBackoffMs));
+                continue;
             }
-
+            img.data = rgb565_buffer;
+        } else if (format == V4L2_PIX_FMT_YUYV) {
             if (rgb565_buffer == nullptr ||
                 !convert_yuyv_to_rgb565(frame_data, frame_len, reinterpret_cast<uint16_t*>(rgb565_buffer), width, height)) {
                 mclog::tagError(kTag, "failed to convert YUYV frame to RGB565");
