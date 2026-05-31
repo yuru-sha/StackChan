@@ -9,7 +9,9 @@
 
 #if CONFIG_IDF_TARGET_ESP32S3
 
+#include <hal/board/config.h>
 #include <hal/board/hal_bridge.h>
+#include <esp_camera.h>
 #include <human_face_detect.hpp>
 #include <mooncake_log.h>
 
@@ -18,8 +20,6 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <linux/videodev2.h>
-#include <esp_heap_caps.h>
 
 namespace {
 
@@ -37,9 +37,7 @@ constexpr int kMaxStableCenterShiftPx    = 32;
 constexpr int kMaxStableSideShiftPx      = 35;
 constexpr int kRequiredLandmarkValues    = 10;
 constexpr int kRequiredConsecutiveHits   = 5;
-constexpr const char* kRgb565NativeVariant = "rgb565_native";
-constexpr const char* kRgb565SwappedVariant = "rgb565_swapped";
-constexpr const char* kYuyvVariant = "yuyv";
+constexpr const char* kEspCameraVariant  = "esp_camera_rgb565";
 #if CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_RODATA
 constexpr const char* kModelStorage = "flash_rodata";
 #elif CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_PARTITION
@@ -52,76 +50,48 @@ constexpr const char* kModelStorage = "unknown";
 
 std::atomic_bool s_started{false};
 
-static inline uint8_t clamp_u8(int value)
+static bool init_esp_camera()
 {
-    return static_cast<uint8_t>(std::min(255, std::max(0, value)));
-}
+    camera_config_t camera_config = {
+        .pin_pwdn = CAMERA_PIN_PWDN,
+        .pin_reset = CAMERA_PIN_RESET,
+        .pin_xclk = CAMERA_PIN_XCLK,
+        .pin_sccb_sda = CAMERA_PIN_SIOD,
+        .pin_sccb_scl = CAMERA_PIN_SIOC,
+        .pin_d7 = CAMERA_PIN_D7,
+        .pin_d6 = CAMERA_PIN_D6,
+        .pin_d5 = CAMERA_PIN_D5,
+        .pin_d4 = CAMERA_PIN_D4,
+        .pin_d3 = CAMERA_PIN_D3,
+        .pin_d2 = CAMERA_PIN_D2,
+        .pin_d1 = CAMERA_PIN_D1,
+        .pin_d0 = CAMERA_PIN_D0,
+        .pin_vsync = CAMERA_PIN_VSYNC,
+        .pin_href = CAMERA_PIN_HREF,
+        .pin_pclk = CAMERA_PIN_PCLK,
+        .xclk_freq_hz = XCLK_FREQ_HZ,
+        .ledc_timer = LEDC_TIMER_0,
+        .ledc_channel = LEDC_CHANNEL_0,
+        .pixel_format = PIXFORMAT_RGB565,
+        .frame_size = FRAMESIZE_QVGA,
+        .jpeg_quality = 12,
+        .fb_count = 2,
+        .fb_location = CAMERA_FB_IN_PSRAM,
+        .grab_mode = CAMERA_GRAB_LATEST,
+    };
 
-static void rgb565_to_rgb888(uint16_t pixel, uint8_t& r, uint8_t& g, uint8_t& b)
-{
-    r = static_cast<uint8_t>(((pixel >> 11) & 0x1F) << 3);
-    g = static_cast<uint8_t>(((pixel >> 5) & 0x3F) << 2);
-    b = static_cast<uint8_t>((pixel & 0x1F) << 3);
-}
-
-static void yuv_to_rgb(uint8_t y, uint8_t u, uint8_t v, uint8_t& r, uint8_t& g, uint8_t& b)
-{
-    int c = static_cast<int>(y) - 16;
-    int d = static_cast<int>(u) - 128;
-    int e = static_cast<int>(v) - 128;
-
-    r = clamp_u8((298 * c + 409 * e + 128) >> 8);
-    g = clamp_u8((298 * c - 100 * d - 208 * e + 128) >> 8);
-    b = clamp_u8((298 * c + 516 * d + 128) >> 8);
-}
-
-static bool convert_rgb565_to_rgb888(const uint8_t* src,
-                                     size_t src_len,
-                                     uint8_t* dst,
-                                     int width,
-                                     int height,
-                                     bool swap_bytes)
-{
-    const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
-    if (src == nullptr || dst == nullptr || src_len < pixel_count * 2) {
+    const esp_err_t err = esp_camera_init(&camera_config);
+    if (err != ESP_OK) {
+        mclog::tagError(kTag, "esp_camera_init failed: 0x{:X}", static_cast<int>(err));
         return false;
     }
 
-    auto src16 = reinterpret_cast<const uint16_t*>(src);
-    for (size_t i = 0; i < pixel_count; ++i) {
-        const uint16_t pixel = swap_bytes ? __builtin_bswap16(src16[i]) : src16[i];
-        rgb565_to_rgb888(pixel, dst[i * 3], dst[i * 3 + 1], dst[i * 3 + 2]);
+    auto sensor = esp_camera_sensor_get();
+    if (sensor != nullptr) {
+        sensor->set_hmirror(sensor, 0);
     }
 
-    return true;
-}
-
-static bool convert_yuyv_to_rgb888(const uint8_t* src, size_t src_len, uint8_t* dst, int width, int height)
-{
-    const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
-    if (src == nullptr || dst == nullptr || src_len < pixel_count * 2) {
-        return false;
-    }
-
-    for (size_t i = 0, out = 0; out + 1 < pixel_count; i += 4, out += 2) {
-        uint8_t r = 0;
-        uint8_t g = 0;
-        uint8_t b = 0;
-        const uint8_t y0 = src[i + 0];
-        const uint8_t u  = src[i + 1];
-        const uint8_t y1 = src[i + 2];
-        const uint8_t v  = src[i + 3];
-
-        yuv_to_rgb(y0, u, v, r, g, b);
-        dst[out * 3] = r;
-        dst[out * 3 + 1] = g;
-        dst[out * 3 + 2] = b;
-        yuv_to_rgb(y1, u, v, r, g, b);
-        dst[(out + 1) * 3] = r;
-        dst[(out + 1) * 3 + 1] = g;
-        dst[(out + 1) * 3 + 2] = b;
-    }
-
+    mclog::tagInfo(kTag, "esp_camera initialized: RGB565 QVGA");
     return true;
 }
 
@@ -231,12 +201,16 @@ static void face_detect_wakeup_task(void*)
     auto detect = new HumanFaceDetect();
     detect->set_score_thr(kMsrScoreThreshold, 0);
     detect->set_score_thr(kMnpScoreThreshold, 1);
-    uint8_t* detect_buffer = nullptr;
-    size_t detect_buffer_len = 0;
     TickType_t last_wake_tick = 0;
     int consecutive_hits = 0;
     bool logged_frame_info = false;
     FaceDetectionSummary previous_detection;
+
+    if (!init_esp_camera()) {
+        mclog::tagError(kTag, "face detect wakeup disabled because camera init failed");
+        vTaskDelete(nullptr);
+        return;
+    }
 
     mclog::tagInfo(kTag, "face detect wakeup task started");
 
@@ -246,93 +220,39 @@ static void face_detect_wakeup_task(void*)
             continue;
         }
 
-        auto camera = hal_bridge::board_get_camera();
-        if (camera == nullptr || !camera->StreamCaptures()) {
+        auto frame = esp_camera_fb_get();
+        if (frame == nullptr) {
+            mclog::tagWarn(kTag, "esp_camera_fb_get failed");
             vTaskDelay(pdMS_TO_TICKS(kUnsupportedBackoffMs));
             continue;
         }
 
-        const auto frame_data = camera->GetFrameData();
-        const auto frame_len = camera->GetFrameSize();
-        const int width = camera->GetFrameWidth();
-        const int height = camera->GetFrameHeight();
-        const int format = camera->GetFrameFormat();
         if (!logged_frame_info) {
-            mclog::tagInfo(kTag, "camera frame: {}x{}, len={}, format=0x{:08X}", width, height, frame_len,
-                           static_cast<uint32_t>(format));
+            mclog::tagInfo(kTag, "camera frame: {}x{}, len={}, format={}", frame->width, frame->height, frame->len,
+                           static_cast<int>(frame->format));
             logged_frame_info = true;
         }
 
-        const size_t required_len = static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
-        if (detect_buffer_len < required_len) {
-            if (detect_buffer != nullptr) {
-                heap_caps_free(detect_buffer);
-                detect_buffer = nullptr;
-            }
-            detect_buffer =
-                static_cast<uint8_t*>(heap_caps_malloc(required_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-            detect_buffer_len = detect_buffer == nullptr ? 0 : required_len;
-        }
-
         dl::image::img_t img = {
-            .data = nullptr,
-            .width = static_cast<uint16_t>(width),
-            .height = static_cast<uint16_t>(height),
-            .pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB888,
+            .data = frame->buf,
+            .width = static_cast<uint16_t>(frame->width),
+            .height = static_cast<uint16_t>(frame->height),
+            .pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB565,
         };
 
         FaceDetectionSummary detection_summary;
-        bool has_face = false;
-        auto run_detection = [&](const char* variant) {
-            img.data = detect_buffer;
-            auto& results = detect->run(img);
-            FaceDetectionSummary summary;
-            const bool confident = has_confident_face(results, width, height, variant, summary);
-            if (confident) {
-                detection_summary = summary;
-                return true;
-            }
-
+        auto& results = detect->run(img);
+        bool has_face = has_confident_face(results, frame->width, frame->height, kEspCameraVariant, detection_summary);
+        if (!has_face) {
             if (!results.empty()) {
                 mclog::tagInfo(kTag,
                                "ignored face detection: variant={}, count={}, best_score={:.2f}, box=[{},{},{},{}], side={}, keypoints={}, reason={}",
-                               summary.variant, results.size(), summary.best_score, summary.best_box[0],
-                               summary.best_box[1], summary.best_box[2], summary.best_box[3], summary.best_side,
-                               summary.best_keypoints, summary.reject_reason);
+                               detection_summary.variant, results.size(), detection_summary.best_score,
+                               detection_summary.best_box[0], detection_summary.best_box[1],
+                               detection_summary.best_box[2], detection_summary.best_box[3],
+                               detection_summary.best_side, detection_summary.best_keypoints,
+                               detection_summary.reject_reason);
             }
-            return false;
-        };
-
-        if (format == V4L2_PIX_FMT_RGB565) {
-            if (detect_buffer == nullptr ||
-                !convert_rgb565_to_rgb888(frame_data, frame_len, detect_buffer, width, height, false)) {
-                mclog::tagError(kTag, "failed to convert native RGB565 frame to RGB888");
-                vTaskDelay(pdMS_TO_TICKS(kUnsupportedBackoffMs));
-                continue;
-            }
-            has_face = run_detection(kRgb565NativeVariant);
-
-            if (!has_face) {
-                if (detect_buffer == nullptr ||
-                    !convert_rgb565_to_rgb888(frame_data, frame_len, detect_buffer, width, height, true)) {
-                    mclog::tagError(kTag, "failed to convert swapped RGB565 frame to RGB888");
-                    vTaskDelay(pdMS_TO_TICKS(kUnsupportedBackoffMs));
-                    continue;
-                }
-                has_face = run_detection(kRgb565SwappedVariant);
-            }
-        } else if (format == V4L2_PIX_FMT_YUYV) {
-            if (detect_buffer == nullptr ||
-                !convert_yuyv_to_rgb888(frame_data, frame_len, detect_buffer, width, height)) {
-                mclog::tagError(kTag, "failed to convert YUYV frame to RGB888");
-                vTaskDelay(pdMS_TO_TICKS(kUnsupportedBackoffMs));
-                continue;
-            }
-            has_face = run_detection(kYuyvVariant);
-        } else {
-            mclog::tagWarn(kTag, "unsupported camera frame format: 0x{:08X}", static_cast<uint32_t>(format));
-            vTaskDelay(pdMS_TO_TICKS(kUnsupportedBackoffMs));
-            continue;
         }
 
         if (has_face) {
@@ -368,6 +288,7 @@ static void face_detect_wakeup_task(void*)
             }
         }
 
+        esp_camera_fb_return(frame);
         vTaskDelay(pdMS_TO_TICKS(kDetectIntervalMs));
     }
 }

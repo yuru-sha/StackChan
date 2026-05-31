@@ -242,7 +242,7 @@ private:
     Aw9523* aw9523_;
     Ft6336* ft6336_;
     LvglDisplay* display_;
-    StackChanCamera* camera_;
+    StackChanCamera* camera_ = nullptr;
     esp_timer_handle_t touchpad_timer_;
     PowerSaveTimer* power_save_timer_;
     hal_bridge::XiaozhiConfig_t xiaozhi_config_;
@@ -500,7 +500,10 @@ public:
         I2cDetect();
         InitializeSpi();
         InitializeIli9342Display();
-        InitializeCamera();
+        // AI.AGENT face wakeup initializes the CoreS3 camera through esp_camera,
+        // matching the working face-detect sample. Do not initialize esp_video
+        // here because both drivers claim the same DVP camera peripheral.
+        // InitializeCamera();
         InitializeFt6336TouchPad();
         GetBacklight()->RestoreBrightness();
     }
