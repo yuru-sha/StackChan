@@ -28,6 +28,15 @@ constexpr uint32_t kIdlePollIntervalMs   = 1000;
 constexpr uint32_t kDetectIntervalMs     = 1500;
 constexpr uint32_t kWakeCooldownMs       = 10000;
 constexpr uint32_t kUnsupportedBackoffMs = 3000;
+#if CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_RODATA
+constexpr const char* kModelStorage = "flash_rodata";
+#elif CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_PARTITION
+constexpr const char* kModelStorage = "flash_partition";
+#elif CONFIG_HUMAN_FACE_DETECT_MODEL_IN_SDCARD
+constexpr const char* kModelStorage = "sdcard";
+#else
+constexpr const char* kModelStorage = "unknown";
+#endif
 
 std::atomic_bool s_started{false};
 
@@ -79,6 +88,8 @@ static bool convert_yuyv_to_rgb565(const uint8_t* src, size_t src_len, uint16_t*
 
 static void face_detect_wakeup_task(void*)
 {
+    mclog::tagInfo(kTag, "human_face_detect model storage={}, location={}", kModelStorage,
+                   CONFIG_HUMAN_FACE_DETECT_MODEL_LOCATION);
     auto detect = new HumanFaceDetect();
     uint8_t* rgb565_buffer = nullptr;
     size_t rgb565_buffer_len = 0;

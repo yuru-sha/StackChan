@@ -217,9 +217,9 @@ StackChanCamera::StackChanCamera(const esp_video_init_config_t& config)
 #else
     auto get_rank = [](uint32_t fmt) -> int {
         switch (fmt) {
-            case V4L2_PIX_FMT_YUV422P:
-                return 10;
             case V4L2_PIX_FMT_RGB565:
+                return 10;
+            case V4L2_PIX_FMT_YUV422P:
                 return 11;
             case V4L2_PIX_FMT_RGB24:
                 return 12;
