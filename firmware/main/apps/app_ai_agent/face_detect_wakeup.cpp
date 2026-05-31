@@ -33,6 +33,7 @@ constexpr float kMnpScoreThreshold       = 0.90F;
 constexpr int kMinFaceSidePx             = 40;
 constexpr int kMaxFaceSidePx             = 220;
 constexpr int kFaceEdgeMarginPx          = 8;
+constexpr int kMinEdgeFaceSidePx         = 90;
 constexpr int kMaxStableCenterShiftPx    = 32;
 constexpr int kMaxStableSideShiftPx      = 35;
 constexpr int kRequiredLandmarkValues    = 10;
@@ -97,6 +98,10 @@ static bool convert_yuyv_to_rgb565(const uint8_t* src, size_t src_len, uint16_t*
 
 struct FaceDetectionSummary {
     float best_score = 0.0F;
+    int best_box[4] = {0, 0, 0, 0};
+    int best_keypoints = 0;
+    int best_side = 0;
+    const char* reject_reason = "none";
     int accepted_box[4] = {0, 0, 0, 0};
     int accepted_keypoints = 0;
     int center_x = 0;
@@ -111,7 +116,19 @@ static bool has_confident_face(const std::list<dl::detect::result_t>& results,
 {
     summary = {};
     for (const auto& result : results) {
-        summary.best_score = std::max(summary.best_score, result.score);
+        if (result.score > summary.best_score) {
+            summary.best_score = result.score;
+            summary.reject_reason = "score_or_keypoints";
+            summary.best_keypoints = static_cast<int>(result.keypoint.size());
+            if (result.box.size() >= 4) {
+                for (int i = 0; i < 4; ++i) {
+                    summary.best_box[i] = result.box[i];
+                }
+                const int width = result.box[2] - result.box[0];
+                const int height = result.box[3] - result.box[1];
+                summary.best_side = std::max(width, height);
+            }
+        }
         if (result.score < kMnpScoreThreshold || result.box.size() < 4 ||
             static_cast<int>(result.keypoint.size()) < kRequiredLandmarkValues) {
             continue;
@@ -121,6 +138,9 @@ static bool has_confident_face(const std::list<dl::detect::result_t>& results,
         const int height = result.box[3] - result.box[1];
         const int side = std::max(width, height);
         if (side < kMinFaceSidePx || side > kMaxFaceSidePx) {
+            if (result.score >= summary.best_score) {
+                summary.reject_reason = "size";
+            }
             continue;
         }
 
@@ -128,7 +148,10 @@ static bool has_confident_face(const std::list<dl::detect::result_t>& results,
                                   result.box[1] <= kFaceEdgeMarginPx ||
                                   result.box[2] >= frame_width - kFaceEdgeMarginPx ||
                                   result.box[3] >= frame_height - kFaceEdgeMarginPx;
-        if (touches_edge) {
+        if (touches_edge && side < kMinEdgeFaceSidePx) {
+            if (result.score >= summary.best_score) {
+                summary.reject_reason = "small_edge";
+            }
             continue;
         }
 
@@ -242,8 +265,12 @@ static void face_detect_wakeup_task(void*)
                            detection_summary.accepted_keypoints);
         } else {
             if (!results.empty()) {
-                mclog::tagInfo(kTag, "ignored weak face detection: count={}, best_score={:.2f}", results.size(),
-                               detection_summary.best_score);
+                mclog::tagInfo(kTag,
+                               "ignored face detection: count={}, best_score={:.2f}, box=[{},{},{},{}], side={}, keypoints={}, reason={}",
+                               results.size(), detection_summary.best_score, detection_summary.best_box[0],
+                               detection_summary.best_box[1], detection_summary.best_box[2],
+                               detection_summary.best_box[3], detection_summary.best_side,
+                               detection_summary.best_keypoints, detection_summary.reject_reason);
             }
             consecutive_hits = 0;
             previous_detection = {};
