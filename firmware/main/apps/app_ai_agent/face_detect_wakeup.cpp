@@ -32,6 +32,9 @@ constexpr float kMsrScoreThreshold       = 0.70F;
 constexpr float kMnpScoreThreshold       = 0.90F;
 constexpr int kMinFaceSidePx             = 40;
 constexpr int kMaxFaceSidePx             = 220;
+constexpr int kFaceEdgeMarginPx          = 8;
+constexpr int kMaxStableCenterShiftPx    = 32;
+constexpr int kMaxStableSideShiftPx      = 35;
 constexpr int kRequiredLandmarkValues    = 10;
 constexpr int kRequiredConsecutiveHits   = 4;
 #if CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_RODATA
@@ -96,9 +99,15 @@ struct FaceDetectionSummary {
     float best_score = 0.0F;
     int accepted_box[4] = {0, 0, 0, 0};
     int accepted_keypoints = 0;
+    int center_x = 0;
+    int center_y = 0;
+    int side = 0;
 };
 
-static bool has_confident_face(const std::list<dl::detect::result_t>& results, FaceDetectionSummary& summary)
+static bool has_confident_face(const std::list<dl::detect::result_t>& results,
+                               int frame_width,
+                               int frame_height,
+                               FaceDetectionSummary& summary)
 {
     summary = {};
     for (const auto& result : results) {
@@ -111,16 +120,40 @@ static bool has_confident_face(const std::list<dl::detect::result_t>& results, F
         const int width = result.box[2] - result.box[0];
         const int height = result.box[3] - result.box[1];
         const int side = std::max(width, height);
-        if (side >= kMinFaceSidePx && side <= kMaxFaceSidePx) {
-            for (int i = 0; i < 4; ++i) {
-                summary.accepted_box[i] = result.box[i];
-            }
-            summary.accepted_keypoints = static_cast<int>(result.keypoint.size());
-            return true;
+        if (side < kMinFaceSidePx || side > kMaxFaceSidePx) {
+            continue;
         }
+
+        const bool touches_edge = result.box[0] <= kFaceEdgeMarginPx ||
+                                  result.box[1] <= kFaceEdgeMarginPx ||
+                                  result.box[2] >= frame_width - kFaceEdgeMarginPx ||
+                                  result.box[3] >= frame_height - kFaceEdgeMarginPx;
+        if (touches_edge) {
+            continue;
+        }
+
+        for (int i = 0; i < 4; ++i) {
+            summary.accepted_box[i] = result.box[i];
+        }
+        summary.accepted_keypoints = static_cast<int>(result.keypoint.size());
+        summary.center_x = (result.box[0] + result.box[2]) / 2;
+        summary.center_y = (result.box[1] + result.box[3]) / 2;
+        summary.side = side;
+        return true;
     }
 
     return false;
+}
+
+static bool is_stable_face_hit(const FaceDetectionSummary& current, const FaceDetectionSummary& previous)
+{
+    if (previous.side == 0) {
+        return true;
+    }
+
+    return std::abs(current.center_x - previous.center_x) <= kMaxStableCenterShiftPx &&
+           std::abs(current.center_y - previous.center_y) <= kMaxStableCenterShiftPx &&
+           std::abs(current.side - previous.side) <= kMaxStableSideShiftPx;
 }
 
 static void face_detect_wakeup_task(void*)
@@ -134,6 +167,7 @@ static void face_detect_wakeup_task(void*)
     size_t rgb565_buffer_len = 0;
     TickType_t last_wake_tick = 0;
     int consecutive_hits = 0;
+    FaceDetectionSummary previous_detection;
 
     mclog::tagInfo(kTag, "face detect wakeup task started");
 
@@ -191,13 +225,20 @@ static void face_detect_wakeup_task(void*)
 
         auto& results = detect->run(img);
         FaceDetectionSummary detection_summary;
-        if (has_confident_face(results, detection_summary)) {
-            consecutive_hits++;
+        if (has_confident_face(results, width, height, detection_summary)) {
+            if (is_stable_face_hit(detection_summary, previous_detection)) {
+                consecutive_hits++;
+            } else {
+                consecutive_hits = 1;
+                mclog::tagInfo(kTag, "reset face hits because bbox moved too much");
+            }
+            previous_detection = detection_summary;
             mclog::tagInfo(kTag,
-                           "accepted face hit {}/{}: score={:.2f}, box=[{},{},{},{}], keypoints={}",
+                           "accepted face hit {}/{}: score={:.2f}, box=[{},{},{},{}], center=[{},{}], side={}, keypoints={}",
                            consecutive_hits, kRequiredConsecutiveHits, detection_summary.best_score,
                            detection_summary.accepted_box[0], detection_summary.accepted_box[1],
                            detection_summary.accepted_box[2], detection_summary.accepted_box[3],
+                           detection_summary.center_x, detection_summary.center_y, detection_summary.side,
                            detection_summary.accepted_keypoints);
         } else {
             if (!results.empty()) {
@@ -205,6 +246,7 @@ static void face_detect_wakeup_task(void*)
                                detection_summary.best_score);
             }
             consecutive_hits = 0;
+            previous_detection = {};
         }
 
         if (consecutive_hits >= kRequiredConsecutiveHits) {
