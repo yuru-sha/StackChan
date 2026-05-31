@@ -37,6 +37,9 @@ constexpr int kMaxStableCenterShiftPx    = 32;
 constexpr int kMaxStableSideShiftPx      = 35;
 constexpr int kRequiredLandmarkValues    = 10;
 constexpr int kRequiredConsecutiveHits   = 5;
+constexpr const char* kRgb565NativeVariant = "rgb565_native";
+constexpr const char* kRgb565SwappedVariant = "rgb565_swapped";
+constexpr const char* kYuyvVariant = "yuyv";
 #if CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_RODATA
 constexpr const char* kModelStorage = "flash_rodata";
 #elif CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_PARTITION
@@ -72,7 +75,12 @@ static void yuv_to_rgb(uint8_t y, uint8_t u, uint8_t v, uint8_t& r, uint8_t& g, 
     b = clamp_u8((298 * c + 516 * d + 128) >> 8);
 }
 
-static bool convert_rgb565_to_rgb888(const uint8_t* src, size_t src_len, uint8_t* dst, int width, int height)
+static bool convert_rgb565_to_rgb888(const uint8_t* src,
+                                     size_t src_len,
+                                     uint8_t* dst,
+                                     int width,
+                                     int height,
+                                     bool swap_bytes)
 {
     const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
     if (src == nullptr || dst == nullptr || src_len < pixel_count * 2) {
@@ -81,7 +89,8 @@ static bool convert_rgb565_to_rgb888(const uint8_t* src, size_t src_len, uint8_t
 
     auto src16 = reinterpret_cast<const uint16_t*>(src);
     for (size_t i = 0; i < pixel_count; ++i) {
-        rgb565_to_rgb888(src16[i], dst[i * 3], dst[i * 3 + 1], dst[i * 3 + 2]);
+        const uint16_t pixel = swap_bytes ? __builtin_bswap16(src16[i]) : src16[i];
+        rgb565_to_rgb888(pixel, dst[i * 3], dst[i * 3 + 1], dst[i * 3 + 2]);
     }
 
     return true;
@@ -118,6 +127,7 @@ static bool convert_yuyv_to_rgb888(const uint8_t* src, size_t src_len, uint8_t* 
 
 struct FaceDetectionSummary {
     float best_score = 0.0F;
+    const char* variant = "none";
     int best_box[4] = {0, 0, 0, 0};
     int best_keypoints = 0;
     int best_side = 0;
@@ -132,9 +142,11 @@ struct FaceDetectionSummary {
 static bool has_confident_face(const std::list<dl::detect::result_t>& results,
                                int frame_width,
                                int frame_height,
+                               const char* variant,
                                FaceDetectionSummary& summary)
 {
     summary = {};
+    summary.variant = variant;
     for (const auto& result : results) {
         if (result.score > summary.best_score) {
             summary.best_score = result.score;
@@ -269,14 +281,46 @@ static void face_detect_wakeup_task(void*)
             .pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB888,
         };
 
+        FaceDetectionSummary detection_summary;
+        bool has_face = false;
+        auto run_detection = [&](const char* variant) {
+            img.data = detect_buffer;
+            auto& results = detect->run(img);
+            FaceDetectionSummary summary;
+            const bool confident = has_confident_face(results, width, height, variant, summary);
+            if (confident) {
+                detection_summary = summary;
+                return true;
+            }
+
+            if (!results.empty()) {
+                mclog::tagInfo(kTag,
+                               "ignored face detection: variant={}, count={}, best_score={:.2f}, box=[{},{},{},{}], side={}, keypoints={}, reason={}",
+                               summary.variant, results.size(), summary.best_score, summary.best_box[0],
+                               summary.best_box[1], summary.best_box[2], summary.best_box[3], summary.best_side,
+                               summary.best_keypoints, summary.reject_reason);
+            }
+            return false;
+        };
+
         if (format == V4L2_PIX_FMT_RGB565) {
             if (detect_buffer == nullptr ||
-                !convert_rgb565_to_rgb888(frame_data, frame_len, detect_buffer, width, height)) {
-                mclog::tagError(kTag, "failed to convert RGB565 frame to RGB888");
+                !convert_rgb565_to_rgb888(frame_data, frame_len, detect_buffer, width, height, false)) {
+                mclog::tagError(kTag, "failed to convert native RGB565 frame to RGB888");
                 vTaskDelay(pdMS_TO_TICKS(kUnsupportedBackoffMs));
                 continue;
             }
-            img.data = detect_buffer;
+            has_face = run_detection(kRgb565NativeVariant);
+
+            if (!has_face) {
+                if (detect_buffer == nullptr ||
+                    !convert_rgb565_to_rgb888(frame_data, frame_len, detect_buffer, width, height, true)) {
+                    mclog::tagError(kTag, "failed to convert swapped RGB565 frame to RGB888");
+                    vTaskDelay(pdMS_TO_TICKS(kUnsupportedBackoffMs));
+                    continue;
+                }
+                has_face = run_detection(kRgb565SwappedVariant);
+            }
         } else if (format == V4L2_PIX_FMT_YUYV) {
             if (detect_buffer == nullptr ||
                 !convert_yuyv_to_rgb888(frame_data, frame_len, detect_buffer, width, height)) {
@@ -284,16 +328,14 @@ static void face_detect_wakeup_task(void*)
                 vTaskDelay(pdMS_TO_TICKS(kUnsupportedBackoffMs));
                 continue;
             }
-            img.data = detect_buffer;
+            has_face = run_detection(kYuyvVariant);
         } else {
             mclog::tagWarn(kTag, "unsupported camera frame format: 0x{:08X}", static_cast<uint32_t>(format));
             vTaskDelay(pdMS_TO_TICKS(kUnsupportedBackoffMs));
             continue;
         }
 
-        auto& results = detect->run(img);
-        FaceDetectionSummary detection_summary;
-        if (has_confident_face(results, width, height, detection_summary)) {
+        if (has_face) {
             if (is_stable_face_hit(detection_summary, previous_detection)) {
                 consecutive_hits++;
             } else {
@@ -302,21 +344,13 @@ static void face_detect_wakeup_task(void*)
             }
             previous_detection = detection_summary;
             mclog::tagInfo(kTag,
-                           "accepted face hit {}/{}: score={:.2f}, box=[{},{},{},{}], center=[{},{}], side={}, keypoints={}",
-                           consecutive_hits, kRequiredConsecutiveHits, detection_summary.best_score,
-                           detection_summary.accepted_box[0], detection_summary.accepted_box[1],
+                           "accepted face hit {}/{}: variant={}, score={:.2f}, box=[{},{},{},{}], center=[{},{}], side={}, keypoints={}",
+                           consecutive_hits, kRequiredConsecutiveHits, detection_summary.variant,
+                           detection_summary.best_score, detection_summary.accepted_box[0], detection_summary.accepted_box[1],
                            detection_summary.accepted_box[2], detection_summary.accepted_box[3],
                            detection_summary.center_x, detection_summary.center_y, detection_summary.side,
                            detection_summary.accepted_keypoints);
         } else {
-            if (!results.empty()) {
-                mclog::tagInfo(kTag,
-                               "ignored face detection: count={}, best_score={:.2f}, box=[{},{},{},{}], side={}, keypoints={}, reason={}",
-                               results.size(), detection_summary.best_score, detection_summary.best_box[0],
-                               detection_summary.best_box[1], detection_summary.best_box[2],
-                               detection_summary.best_box[3], detection_summary.best_side,
-                               detection_summary.best_keypoints, detection_summary.reject_reason);
-            }
             consecutive_hits = 0;
             previous_detection = {};
         }
