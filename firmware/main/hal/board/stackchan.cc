@@ -659,3 +659,14 @@ void hal_bridge::toggle_xiaozhi_chat_state()
     }
     app.ToggleChatState();
 }
+
+bool hal_bridge::start_xiaozhi_chat_from_idle()
+{
+    auto& app = Application::GetInstance();
+    if (app.GetDeviceState() != kDeviceStateIdle) {
+        return false;
+    }
+
+    app.ToggleChatState();
+    return true;
+}

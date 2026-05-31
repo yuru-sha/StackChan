@@ -28,12 +28,12 @@ constexpr uint32_t kIdlePollIntervalMs   = 1000;
 constexpr uint32_t kDetectIntervalMs     = 1500;
 constexpr uint32_t kWakeCooldownMs       = 10000;
 constexpr uint32_t kUnsupportedBackoffMs = 3000;
-constexpr float kMsrScoreThreshold       = 0.65F;
-constexpr float kMnpScoreThreshold       = 0.75F;
-constexpr int kMinFaceSidePx             = 32;
+constexpr float kMsrScoreThreshold       = 0.70F;
+constexpr float kMnpScoreThreshold       = 0.90F;
+constexpr int kMinFaceSidePx             = 40;
 constexpr int kMaxFaceSidePx             = 220;
 constexpr int kRequiredLandmarkValues    = 10;
-constexpr int kRequiredConsecutiveHits   = 2;
+constexpr int kRequiredConsecutiveHits   = 4;
 #if CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_RODATA
 constexpr const char* kModelStorage = "flash_rodata";
 #elif CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_PARTITION
@@ -92,11 +92,17 @@ static bool convert_yuyv_to_rgb565(const uint8_t* src, size_t src_len, uint16_t*
     return true;
 }
 
-static bool has_confident_face(const std::list<dl::detect::result_t>& results, float& best_score)
+struct FaceDetectionSummary {
+    float best_score = 0.0F;
+    int accepted_box[4] = {0, 0, 0, 0};
+    int accepted_keypoints = 0;
+};
+
+static bool has_confident_face(const std::list<dl::detect::result_t>& results, FaceDetectionSummary& summary)
 {
-    best_score = 0.0F;
+    summary = {};
     for (const auto& result : results) {
-        best_score = std::max(best_score, result.score);
+        summary.best_score = std::max(summary.best_score, result.score);
         if (result.score < kMnpScoreThreshold || result.box.size() < 4 ||
             static_cast<int>(result.keypoint.size()) < kRequiredLandmarkValues) {
             continue;
@@ -106,6 +112,10 @@ static bool has_confident_face(const std::list<dl::detect::result_t>& results, f
         const int height = result.box[3] - result.box[1];
         const int side = std::max(width, height);
         if (side >= kMinFaceSidePx && side <= kMaxFaceSidePx) {
+            for (int i = 0; i < 4; ++i) {
+                summary.accepted_box[i] = result.box[i];
+            }
+            summary.accepted_keypoints = static_cast<int>(result.keypoint.size());
             return true;
         }
     }
@@ -180,13 +190,19 @@ static void face_detect_wakeup_task(void*)
         }
 
         auto& results = detect->run(img);
-        float best_score = 0.0F;
-        if (has_confident_face(results, best_score)) {
+        FaceDetectionSummary detection_summary;
+        if (has_confident_face(results, detection_summary)) {
             consecutive_hits++;
+            mclog::tagInfo(kTag,
+                           "accepted face hit {}/{}: score={:.2f}, box=[{},{},{},{}], keypoints={}",
+                           consecutive_hits, kRequiredConsecutiveHits, detection_summary.best_score,
+                           detection_summary.accepted_box[0], detection_summary.accepted_box[1],
+                           detection_summary.accepted_box[2], detection_summary.accepted_box[3],
+                           detection_summary.accepted_keypoints);
         } else {
             if (!results.empty()) {
                 mclog::tagInfo(kTag, "ignored weak face detection: count={}, best_score={:.2f}", results.size(),
-                               best_score);
+                               detection_summary.best_score);
             }
             consecutive_hits = 0;
         }
@@ -198,7 +214,9 @@ static void face_detect_wakeup_task(void*)
                 last_wake_tick = now;
                 consecutive_hits = 0;
                 mclog::tagInfo(kTag, "face detected, turning conversation on");
-                hal_bridge::toggle_xiaozhi_chat_state();
+                if (!hal_bridge::start_xiaozhi_chat_from_idle()) {
+                    mclog::tagInfo(kTag, "skip face wakeup because Xiaozhi is no longer idle");
+                }
             }
         }
 

@@ -40,6 +40,7 @@ TouchPoint_t get_touch_point();
 bool is_xiaozhi_mode();
 void set_xiaozhi_mode(bool mode);
 void toggle_xiaozhi_chat_state();
+bool start_xiaozhi_chat_from_idle();
 
 void disply_lvgl_lock();
 void disply_lvgl_unlock();
