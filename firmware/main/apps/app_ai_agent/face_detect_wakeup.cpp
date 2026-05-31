@@ -29,15 +29,14 @@ constexpr uint32_t kDetectIntervalMs     = 1500;
 constexpr uint32_t kWakeCooldownMs       = 10000;
 constexpr uint32_t kUnsupportedBackoffMs = 3000;
 constexpr float kMsrScoreThreshold       = 0.70F;
-constexpr float kMnpScoreThreshold       = 0.90F;
-constexpr int kMinFaceSidePx             = 40;
+constexpr float kMnpScoreThreshold       = 0.97F;
+constexpr int kMinFaceSidePx             = 80;
 constexpr int kMaxFaceSidePx             = 220;
 constexpr int kFaceEdgeMarginPx          = 8;
-constexpr int kMinEdgeFaceSidePx         = 90;
 constexpr int kMaxStableCenterShiftPx    = 32;
 constexpr int kMaxStableSideShiftPx      = 35;
 constexpr int kRequiredLandmarkValues    = 10;
-constexpr int kRequiredConsecutiveHits   = 4;
+constexpr int kRequiredConsecutiveHits   = 5;
 #if CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_RODATA
 constexpr const char* kModelStorage = "flash_rodata";
 #elif CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_PARTITION
@@ -169,9 +168,22 @@ static bool has_confident_face(const std::list<dl::detect::result_t>& results,
                                   result.box[1] <= kFaceEdgeMarginPx ||
                                   result.box[2] >= frame_width - kFaceEdgeMarginPx ||
                                   result.box[3] >= frame_height - kFaceEdgeMarginPx;
-        if (touches_edge && side < kMinEdgeFaceSidePx) {
+        if (touches_edge) {
             if (result.score >= summary.best_score) {
-                summary.reject_reason = "small_edge";
+                summary.reject_reason = "edge";
+            }
+            continue;
+        }
+
+        const int center_x = (result.box[0] + result.box[2]) / 2;
+        const int center_y = (result.box[1] + result.box[3]) / 2;
+        const bool near_center = center_x >= frame_width / 5 &&
+                                 center_x <= (frame_width * 4) / 5 &&
+                                 center_y >= frame_height / 6 &&
+                                 center_y <= (frame_height * 5) / 6;
+        if (!near_center) {
+            if (result.score >= summary.best_score) {
+                summary.reject_reason = "off_center";
             }
             continue;
         }
@@ -180,8 +192,8 @@ static bool has_confident_face(const std::list<dl::detect::result_t>& results,
             summary.accepted_box[i] = result.box[i];
         }
         summary.accepted_keypoints = static_cast<int>(result.keypoint.size());
-        summary.center_x = (result.box[0] + result.box[2]) / 2;
-        summary.center_y = (result.box[1] + result.box[3]) / 2;
+        summary.center_x = center_x;
+        summary.center_y = center_y;
         summary.side = side;
         return true;
     }
