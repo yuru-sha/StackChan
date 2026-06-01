@@ -37,6 +37,7 @@ constexpr int kMaxStableCenterShiftPx    = 32;
 constexpr int kMaxStableSideShiftPx      = 35;
 constexpr int kRequiredLandmarkValues    = 10;
 constexpr int kRequiredConsecutiveHits   = 5;
+constexpr int kCoreS3CameraXclkHz        = 10000000;
 constexpr const char* kEspCameraVariant  = "esp_camera_rgb565";
 #if CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_RODATA
 constexpr const char* kModelStorage = "flash_rodata";
@@ -69,7 +70,7 @@ static bool init_esp_camera()
         .pin_vsync = CAMERA_PIN_VSYNC,
         .pin_href = CAMERA_PIN_HREF,
         .pin_pclk = CAMERA_PIN_PCLK,
-        .xclk_freq_hz = XCLK_FREQ_HZ,
+        .xclk_freq_hz = kCoreS3CameraXclkHz,
         .ledc_timer = LEDC_TIMER_0,
         .ledc_channel = LEDC_CHANNEL_0,
         .pixel_format = PIXFORMAT_RGB565,
@@ -77,7 +78,7 @@ static bool init_esp_camera()
         .jpeg_quality = 12,
         .fb_count = 2,
         .fb_location = CAMERA_FB_IN_PSRAM,
-        .grab_mode = CAMERA_GRAB_LATEST,
+        .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
         .sccb_i2c_port = 1,
     };
 
@@ -92,7 +93,7 @@ static bool init_esp_camera()
         sensor->set_hmirror(sensor, 0);
     }
 
-    mclog::tagInfo(kTag, "esp_camera initialized: RGB565 QVGA");
+    mclog::tagInfo(kTag, "esp_camera initialized: RGB565 QVGA, xclk={}Hz", kCoreS3CameraXclkHz);
     return true;
 }
 
