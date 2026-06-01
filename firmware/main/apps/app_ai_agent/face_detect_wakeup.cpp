@@ -29,8 +29,7 @@ constexpr uint32_t kDetectIntervalMs     = 1500;
 constexpr uint32_t kWakeCooldownMs       = 10000;
 constexpr uint32_t kUnsupportedBackoffMs = 3000;
 constexpr uint32_t kStateLogIntervalMs   = 10000;
-constexpr float kMsrScoreThreshold       = 0.70F;
-constexpr float kMnpScoreThreshold       = 0.97F;
+constexpr float kWakeScoreThreshold      = 0.97F;
 constexpr int kMinFaceSidePx             = 80;
 constexpr int kMaxFaceSidePx             = 220;
 constexpr int kFaceEdgeMarginPx          = 8;
@@ -112,6 +111,33 @@ struct FaceDetectionSummary {
     int side = 0;
 };
 
+static void log_raw_face_results(const std::list<dl::detect::result_t>& results)
+{
+    int index = 0;
+    for (const auto& result : results) {
+        if (result.box.size() < 4) {
+            mclog::tagInfo(kTag, "raw face result {}: score={:.2f}, box_values={}, keypoints={}", index,
+                           result.score, result.box.size(), result.keypoint.size());
+            index++;
+            continue;
+        }
+
+        if (result.keypoint.size() >= kRequiredLandmarkValues) {
+            mclog::tagInfo(kTag,
+                           "raw face result {}: score={:.2f}, box=[{},{},{},{}], keypoints=[{},{},{},{},{},{},{},{},{},{}]",
+                           index, result.score, result.box[0], result.box[1], result.box[2], result.box[3],
+                           result.keypoint[0], result.keypoint[1], result.keypoint[2], result.keypoint[3],
+                           result.keypoint[4], result.keypoint[5], result.keypoint[6], result.keypoint[7],
+                           result.keypoint[8], result.keypoint[9]);
+        } else {
+            mclog::tagInfo(kTag, "raw face result {}: score={:.2f}, box=[{},{},{},{}], keypoints={}", index,
+                           result.score, result.box[0], result.box[1], result.box[2], result.box[3],
+                           result.keypoint.size());
+        }
+        index++;
+    }
+}
+
 static bool has_confident_face(const std::list<dl::detect::result_t>& results,
                                int frame_width,
                                int frame_height,
@@ -134,18 +160,8 @@ static bool has_confident_face(const std::list<dl::detect::result_t>& results,
                 summary.best_side = std::max(width, height);
             }
         }
-        if (result.score < kMnpScoreThreshold || result.box.size() < 4 ||
+        if (result.score < kWakeScoreThreshold || result.box.size() < 4 ||
             static_cast<int>(result.keypoint.size()) < kRequiredLandmarkValues) {
-            continue;
-        }
-
-        const int width = result.box[2] - result.box[0];
-        const int height = result.box[3] - result.box[1];
-        const int side = std::max(width, height);
-        if (side < kMinFaceSidePx || side > kMaxFaceSidePx) {
-            if (result.score >= summary.best_score) {
-                summary.reject_reason = "size";
-            }
             continue;
         }
 
@@ -156,6 +172,16 @@ static bool has_confident_face(const std::list<dl::detect::result_t>& results,
         if (touches_edge) {
             if (result.score >= summary.best_score) {
                 summary.reject_reason = "edge";
+            }
+            continue;
+        }
+
+        const int width = result.box[2] - result.box[0];
+        const int height = result.box[3] - result.box[1];
+        const int side = std::max(width, height);
+        if (side < kMinFaceSidePx || side > kMaxFaceSidePx) {
+            if (result.score >= summary.best_score) {
+                summary.reject_reason = "size";
             }
             continue;
         }
@@ -202,8 +228,6 @@ static void face_detect_wakeup_task(void*)
     mclog::tagInfo(kTag, "human_face_detect model storage={}, location={}", kModelStorage,
                    CONFIG_HUMAN_FACE_DETECT_MODEL_LOCATION);
     auto detect = new HumanFaceDetect();
-    detect->set_score_thr(kMsrScoreThreshold, 0);
-    detect->set_score_thr(kMnpScoreThreshold, 1);
     TickType_t last_wake_tick = 0;
     TickType_t last_state_log_tick = 0;
     int consecutive_hits = 0;
@@ -220,6 +244,8 @@ static void face_detect_wakeup_task(void*)
     }
 
     mclog::tagInfo(kTag, "face detect wakeup task started");
+    mclog::tagInfo(kTag, "detector uses human_face_detect default score thresholds; wake score threshold={:.2f}",
+                   kWakeScoreThreshold);
 
     while (true) {
         const bool is_ready = hal_bridge::is_xiaozhi_ready();
@@ -262,6 +288,7 @@ static void face_detect_wakeup_task(void*)
 
         FaceDetectionSummary detection_summary;
         auto& results = detect->run(img);
+        log_raw_face_results(results);
         bool has_face = has_confident_face(results, frame->width, frame->height, kEspCameraVariant, detection_summary);
         if (!has_face) {
             if (!results.empty()) {
