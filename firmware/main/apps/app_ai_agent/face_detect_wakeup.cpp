@@ -56,8 +56,8 @@ static bool init_esp_camera()
         .pin_pwdn = CAMERA_PIN_PWDN,
         .pin_reset = CAMERA_PIN_RESET,
         .pin_xclk = CAMERA_PIN_XCLK,
-        .pin_sccb_sda = CAMERA_PIN_SIOD,
-        .pin_sccb_scl = CAMERA_PIN_SIOC,
+        .pin_sccb_sda = -1,
+        .pin_sccb_scl = -1,
         .pin_d7 = CAMERA_PIN_D7,
         .pin_d6 = CAMERA_PIN_D6,
         .pin_d5 = CAMERA_PIN_D5,
@@ -78,6 +78,7 @@ static bool init_esp_camera()
         .fb_count = 2,
         .fb_location = CAMERA_FB_IN_PSRAM,
         .grab_mode = CAMERA_GRAB_LATEST,
+        .sccb_i2c_port = 1,
     };
 
     const esp_err_t err = esp_camera_init(&camera_config);
