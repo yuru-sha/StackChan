@@ -28,6 +28,7 @@ constexpr uint32_t kIdlePollIntervalMs   = 1000;
 constexpr uint32_t kDetectIntervalMs     = 1500;
 constexpr uint32_t kWakeCooldownMs       = 10000;
 constexpr uint32_t kUnsupportedBackoffMs = 3000;
+constexpr uint32_t kStateLogIntervalMs   = 10000;
 constexpr float kMsrScoreThreshold       = 0.70F;
 constexpr float kMnpScoreThreshold       = 0.97F;
 constexpr int kMinFaceSidePx             = 80;
@@ -204,8 +205,12 @@ static void face_detect_wakeup_task(void*)
     detect->set_score_thr(kMsrScoreThreshold, 0);
     detect->set_score_thr(kMnpScoreThreshold, 1);
     TickType_t last_wake_tick = 0;
+    TickType_t last_state_log_tick = 0;
     int consecutive_hits = 0;
     bool logged_frame_info = false;
+    bool last_ready = false;
+    bool last_idle = false;
+    bool has_logged_state = false;
     FaceDetectionSummary previous_detection;
 
     if (!init_esp_camera()) {
@@ -217,7 +222,20 @@ static void face_detect_wakeup_task(void*)
     mclog::tagInfo(kTag, "face detect wakeup task started");
 
     while (true) {
-        if (!hal_bridge::is_xiaozhi_ready() || !hal_bridge::is_xiaozhi_idle()) {
+        const bool is_ready = hal_bridge::is_xiaozhi_ready();
+        const bool is_idle = hal_bridge::is_xiaozhi_idle();
+        if (!is_ready || !is_idle) {
+            const TickType_t now = xTaskGetTickCount();
+            const bool state_changed = !has_logged_state || is_ready != last_ready || is_idle != last_idle;
+            const bool should_log_periodically =
+                last_state_log_tick == 0 || (now - last_state_log_tick) >= pdMS_TO_TICKS(kStateLogIntervalMs);
+            if (state_changed || should_log_periodically) {
+                mclog::tagInfo(kTag, "waiting for idle conversation: ready={}, idle={}", is_ready, is_idle);
+                last_ready = is_ready;
+                last_idle = is_idle;
+                has_logged_state = true;
+                last_state_log_tick = now;
+            }
             vTaskDelay(pdMS_TO_TICKS(kIdlePollIntervalMs));
             continue;
         }
