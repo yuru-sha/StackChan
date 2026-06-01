@@ -12,11 +12,13 @@
 #include <hal/board/config.h>
 #include <hal/board/hal_bridge.h>
 #include <esp_camera.h>
+#include <esp_heap_caps.h>
 #include <human_face_detect.hpp>
 #include <mooncake_log.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -39,6 +41,7 @@ constexpr int kRequiredLandmarkValues    = 10;
 constexpr int kRequiredConsecutiveHits   = 5;
 constexpr int kCoreS3CameraXclkHz        = 10000000;
 constexpr const char* kEspCameraVariant  = "esp_camera_rgb565";
+constexpr const char* kSwappedVariant    = "esp_camera_rgb565_byteswapped";
 #if CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_RODATA
 constexpr const char* kModelStorage = "flash_rodata";
 #elif CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_PARTITION
@@ -129,31 +132,77 @@ struct FaceDetectionSummary {
     int side = 0;
 };
 
-static void log_raw_face_results(const std::list<dl::detect::result_t>& results)
+static bool has_confident_face(const std::list<dl::detect::result_t>& results,
+                               int frame_width,
+                               int frame_height,
+                               const char* variant,
+                               FaceDetectionSummary& summary);
+
+static void log_raw_face_results(const char* variant, const std::list<dl::detect::result_t>& results)
 {
     int index = 0;
     for (const auto& result : results) {
         if (result.box.size() < 4) {
-            mclog::tagInfo(kTag, "raw face result {}: score={:.2f}, box_values={}, keypoints={}", index,
-                           result.score, result.box.size(), result.keypoint.size());
+            mclog::tagInfo(kTag, "raw face result {}: variant={}, score={:.2f}, box_values={}, keypoints={}",
+                           index, variant, result.score, result.box.size(), result.keypoint.size());
             index++;
             continue;
         }
 
         if (result.keypoint.size() >= kRequiredLandmarkValues) {
             mclog::tagInfo(kTag,
-                           "raw face result {}: score={:.2f}, box=[{},{},{},{}], keypoints=[{},{},{},{},{},{},{},{},{},{}]",
-                           index, result.score, result.box[0], result.box[1], result.box[2], result.box[3],
-                           result.keypoint[0], result.keypoint[1], result.keypoint[2], result.keypoint[3],
-                           result.keypoint[4], result.keypoint[5], result.keypoint[6], result.keypoint[7],
-                           result.keypoint[8], result.keypoint[9]);
+                           "raw face result {}: variant={}, score={:.2f}, box=[{},{},{},{}], keypoints=[{},{},{},{},{},{},{},{},{},{}]",
+                           index, variant, result.score, result.box[0], result.box[1], result.box[2],
+                           result.box[3], result.keypoint[0], result.keypoint[1], result.keypoint[2],
+                           result.keypoint[3], result.keypoint[4], result.keypoint[5], result.keypoint[6],
+                           result.keypoint[7], result.keypoint[8], result.keypoint[9]);
         } else {
-            mclog::tagInfo(kTag, "raw face result {}: score={:.2f}, box=[{},{},{},{}], keypoints={}", index,
-                           result.score, result.box[0], result.box[1], result.box[2], result.box[3],
-                           result.keypoint.size());
+            mclog::tagInfo(kTag, "raw face result {}: variant={}, score={:.2f}, box=[{},{},{},{}], keypoints={}",
+                           index, variant, result.score, result.box[0], result.box[1], result.box[2],
+                           result.box[3], result.keypoint.size());
         }
         index++;
     }
+}
+
+static void swap_rgb565_bytes(uint8_t* dst, const uint8_t* src, size_t len)
+{
+    const size_t even_len = len & ~static_cast<size_t>(1);
+    for (size_t i = 0; i < even_len; i += 2) {
+        dst[i] = src[i + 1];
+        dst[i + 1] = src[i];
+    }
+    if (even_len != len) {
+        dst[even_len] = src[even_len];
+    }
+}
+
+static bool run_face_detection(HumanFaceDetect* detect,
+                               const char* variant,
+                               uint8_t* data,
+                               uint16_t width,
+                               uint16_t height,
+                               FaceDetectionSummary& detection_summary)
+{
+    dl::image::img_t img = {
+        .data = data,
+        .width = width,
+        .height = height,
+        .pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB565,
+    };
+
+    auto& results = detect->run(img);
+    log_raw_face_results(variant, results);
+    const bool has_face = has_confident_face(results, width, height, variant, detection_summary);
+    if (!has_face && !results.empty()) {
+        mclog::tagInfo(kTag,
+                       "ignored face detection: variant={}, count={}, best_score={:.2f}, box=[{},{},{},{}], side={}, keypoints={}, reason={}",
+                       detection_summary.variant, results.size(), detection_summary.best_score,
+                       detection_summary.best_box[0], detection_summary.best_box[1], detection_summary.best_box[2],
+                       detection_summary.best_box[3], detection_summary.best_side, detection_summary.best_keypoints,
+                       detection_summary.reject_reason);
+    }
+    return has_face;
 }
 
 static bool has_confident_face(const std::list<dl::detect::result_t>& results,
@@ -297,26 +346,31 @@ static void face_detect_wakeup_task(void*)
             logged_frame_info = true;
         }
 
-        dl::image::img_t img = {
-            .data = frame->buf,
-            .width = static_cast<uint16_t>(frame->width),
-            .height = static_cast<uint16_t>(frame->height),
-            .pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB565,
-        };
-
         FaceDetectionSummary detection_summary;
-        auto& results = detect->run(img);
-        log_raw_face_results(results);
-        bool has_face = has_confident_face(results, frame->width, frame->height, kEspCameraVariant, detection_summary);
+        bool has_face = run_face_detection(detect,
+                                           kEspCameraVariant,
+                                           frame->buf,
+                                           static_cast<uint16_t>(frame->width),
+                                           static_cast<uint16_t>(frame->height),
+                                           detection_summary);
+
+        uint8_t* swapped_frame = nullptr;
         if (!has_face) {
-            if (!results.empty()) {
-                mclog::tagInfo(kTag,
-                               "ignored face detection: variant={}, count={}, best_score={:.2f}, box=[{},{},{},{}], side={}, keypoints={}, reason={}",
-                               detection_summary.variant, results.size(), detection_summary.best_score,
-                               detection_summary.best_box[0], detection_summary.best_box[1],
-                               detection_summary.best_box[2], detection_summary.best_box[3],
-                               detection_summary.best_side, detection_summary.best_keypoints,
-                               detection_summary.reject_reason);
+            swapped_frame = static_cast<uint8_t*>(heap_caps_malloc(frame->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (swapped_frame == nullptr) {
+                mclog::tagWarn(kTag, "failed to allocate byte-swapped RGB565 frame");
+            } else {
+                swap_rgb565_bytes(swapped_frame, frame->buf, frame->len);
+                FaceDetectionSummary swapped_summary;
+                has_face = run_face_detection(detect,
+                                              kSwappedVariant,
+                                              swapped_frame,
+                                              static_cast<uint16_t>(frame->width),
+                                              static_cast<uint16_t>(frame->height),
+                                              swapped_summary);
+                if (has_face) {
+                    detection_summary = swapped_summary;
+                }
             }
         }
 
@@ -354,6 +408,9 @@ static void face_detect_wakeup_task(void*)
         }
 
         esp_camera_fb_return(frame);
+        if (swapped_frame != nullptr) {
+            heap_caps_free(swapped_frame);
+        }
         vTaskDelay(pdMS_TO_TICKS(kDetectIntervalMs));
     }
 }
