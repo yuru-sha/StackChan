@@ -51,9 +51,9 @@ constexpr const char* kModelStorage = "unknown";
 
 std::atomic_bool s_started{false};
 
-static bool init_esp_camera()
+static camera_config_t make_camera_config(size_t fb_count)
 {
-    camera_config_t camera_config = {
+    return camera_config_t{
         .pin_pwdn = CAMERA_PIN_PWDN,
         .pin_reset = CAMERA_PIN_RESET,
         .pin_xclk = CAMERA_PIN_XCLK,
@@ -76,15 +76,22 @@ static bool init_esp_camera()
         .pixel_format = PIXFORMAT_RGB565,
         .frame_size = FRAMESIZE_QVGA,
         .jpeg_quality = 12,
-        .fb_count = 2,
+        .fb_count = fb_count,
         .fb_location = CAMERA_FB_IN_PSRAM,
         .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
         .sccb_i2c_port = 1,
     };
+}
 
+static bool try_init_esp_camera(bool psram_dma, size_t fb_count)
+{
+    esp_camera_set_psram_mode(psram_dma);
+    camera_config_t camera_config = make_camera_config(fb_count);
     const esp_err_t err = esp_camera_init(&camera_config);
     if (err != ESP_OK) {
-        mclog::tagError(kTag, "esp_camera_init failed: 0x{:X}", static_cast<int>(err));
+        mclog::tagError(kTag, "esp_camera_init failed: psram_dma={}, fb_count={}, err=0x{:X}", psram_dma,
+                        fb_count, static_cast<int>(err));
+        esp_camera_deinit();
         return false;
     }
 
@@ -93,8 +100,19 @@ static bool init_esp_camera()
         sensor->set_hmirror(sensor, 0);
     }
 
-    mclog::tagInfo(kTag, "esp_camera initialized: RGB565 QVGA, xclk={}Hz", kCoreS3CameraXclkHz);
+    mclog::tagInfo(kTag, "esp_camera initialized: RGB565 QVGA, xclk={}Hz, psram_dma={}, fb_count={}",
+                   kCoreS3CameraXclkHz, psram_dma, fb_count);
     return true;
+}
+
+static bool init_esp_camera()
+{
+    if (try_init_esp_camera(false, 1)) {
+        return true;
+    }
+
+    mclog::tagWarn(kTag, "retry esp_camera_init with PSRAM DMA enabled");
+    return try_init_esp_camera(true, 2);
 }
 
 struct FaceDetectionSummary {
