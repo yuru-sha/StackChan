@@ -294,7 +294,6 @@ static void face_detect_wakeup_task(void*)
 {
     mclog::tagInfo(kTag, "human_face_detect model storage={}, location={}", kModelStorage,
                    CONFIG_HUMAN_FACE_DETECT_MODEL_LOCATION);
-    auto detect = new HumanFaceDetect();
     TickType_t last_wake_tick = 0;
     TickType_t last_state_log_tick = 0;
     int consecutive_hits = 0;
@@ -310,6 +309,7 @@ static void face_detect_wakeup_task(void*)
         return;
     }
 
+    auto detect = new HumanFaceDetect();
     mclog::tagInfo(kTag, "face detect wakeup task started");
     mclog::tagInfo(kTag, "detector uses human_face_detect default score thresholds; wake score threshold={:.2f}",
                    kWakeScoreThreshold);
