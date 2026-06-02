@@ -13,6 +13,7 @@
 #include <hal/board/hal_bridge.h>
 #include <esp_camera.h>
 #include <esp_heap_caps.h>
+#include <esp_lvgl_port.h>
 #include <human_face_detect.hpp>
 #include <mooncake_log.h>
 
@@ -58,6 +59,36 @@ constexpr const char* kModelStorage = "unknown";
 #endif
 
 std::atomic_bool s_started{false};
+
+class LcdBusQuietGuard {
+public:
+    LcdBusQuietGuard()
+    {
+        stopped_ = lvgl_port_stop() == ESP_OK;
+        locked_  = lvgl_port_lock(1000);
+        if (!locked_) {
+            mclog::tagWarn(kTag, "failed to lock LVGL before camera capture");
+            return;
+        }
+
+        // CoreS3 shares several LCD and camera pins. Give any in-flight LCD DMA transfer time to drain.
+        vTaskDelay(pdMS_TO_TICKS(80));
+    }
+
+    ~LcdBusQuietGuard()
+    {
+        if (locked_) {
+            lvgl_port_unlock();
+        }
+        if (stopped_) {
+            lvgl_port_resume();
+        }
+    }
+
+private:
+    bool stopped_ = false;
+    bool locked_  = false;
+};
 
 static void log_camera_heap(const char* phase)
 {
@@ -357,7 +388,11 @@ static void face_detect_wakeup_task(void*)
             continue;
         }
 
-        auto frame = esp_camera_fb_get();
+        camera_fb_t* frame = nullptr;
+        {
+            LcdBusQuietGuard lcd_bus_quiet;
+            frame = esp_camera_fb_get();
+        }
         if (frame == nullptr) {
             mclog::tagWarn(kTag, "esp_camera_fb_get failed");
             vTaskDelay(pdMS_TO_TICKS(kUnsupportedBackoffMs));
