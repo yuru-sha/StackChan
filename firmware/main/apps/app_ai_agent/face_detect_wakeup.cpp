@@ -49,6 +49,8 @@ constexpr const char* kSwappedVariant    = "esp_camera_rgb565_byteswapped";
 constexpr const char* kSwappedDimsVariant = "esp_camera_rgb565_swapped_dims";
 constexpr const char* kRotCwVariant      = "esp_camera_rgb565_rot90_cw";
 constexpr const char* kRotCcwVariant     = "esp_camera_rgb565_rot90_ccw";
+constexpr const char* kRgb888LeVariant   = "esp_camera_rgb888_from_le";
+constexpr const char* kRgb888BeVariant   = "esp_camera_rgb888_from_be";
 #if CONFIG_CAMERA_PSRAM_DMA
 constexpr bool kDefaultCameraPsramDma = true;
 #else
@@ -263,6 +265,22 @@ static void rotate_rgb565_90_ccw(uint8_t* dst, const uint8_t* src, uint16_t src_
             dst[dst_index]         = src[src_index];
             dst[dst_index + 1]     = src[src_index + 1];
         }
+    }
+}
+
+static void rgb565_to_rgb888(uint8_t* dst, const uint8_t* src, size_t pixel_count, bool big_endian)
+{
+    for (size_t i = 0; i < pixel_count; ++i) {
+        const uint8_t b0 = src[i * 2];
+        const uint8_t b1 = src[i * 2 + 1];
+        const uint16_t pixel = big_endian ? (static_cast<uint16_t>(b0) << 8) | b1
+                                          : (static_cast<uint16_t>(b1) << 8) | b0;
+        const uint8_t r5 = (pixel >> 11) & 0x1F;
+        const uint8_t g6 = (pixel >> 5) & 0x3F;
+        const uint8_t b5 = pixel & 0x1F;
+        dst[i * 3]     = static_cast<uint8_t>((r5 << 3) | (r5 >> 2));
+        dst[i * 3 + 1] = static_cast<uint8_t>((g6 << 2) | (g6 >> 4));
+        dst[i * 3 + 2] = static_cast<uint8_t>((b5 << 3) | (b5 >> 2));
     }
 }
 
@@ -549,6 +567,73 @@ static void face_detect_wakeup_task(void*)
             }
         }
 
+        uint8_t* rgb888_frame = nullptr;
+        if (!has_face) {
+            const size_t rgb888_len = static_cast<size_t>(frame->width) * frame->height * 3;
+            rgb888_frame = static_cast<uint8_t*>(heap_caps_malloc(rgb888_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (rgb888_frame == nullptr) {
+                mclog::tagWarn(kTag, "failed to allocate RGB888 frame");
+            } else {
+                rgb565_to_rgb888(rgb888_frame, frame->buf, static_cast<size_t>(frame->width) * frame->height, false);
+                dl::image::img_t img = {
+                    .data = rgb888_frame,
+                    .width = static_cast<uint16_t>(frame->width),
+                    .height = static_cast<uint16_t>(frame->height),
+                    .pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB888,
+                };
+
+                auto& results = detect->run(img);
+                log_raw_face_results(kRgb888LeVariant, results);
+                FaceDetectionSummary rgb888_summary;
+                has_face = has_confident_face(results,
+                                              static_cast<int>(frame->width),
+                                              static_cast<int>(frame->height),
+                                              kRgb888LeVariant,
+                                              rgb888_summary);
+                if (!has_face && !results.empty()) {
+                    mclog::tagInfo(kTag,
+                                   "ignored face detection: variant={}, count={}, best_score={:.2f}, box=[{},{},{},{}], side={}, keypoints={}, reason={}",
+                                   rgb888_summary.variant, results.size(), rgb888_summary.best_score,
+                                   rgb888_summary.best_box[0], rgb888_summary.best_box[1], rgb888_summary.best_box[2],
+                                   rgb888_summary.best_box[3], rgb888_summary.best_side, rgb888_summary.best_keypoints,
+                                   rgb888_summary.reject_reason);
+                }
+                if (has_face) {
+                    detection_summary = rgb888_summary;
+                }
+            }
+        }
+
+        if (!has_face && rgb888_frame != nullptr) {
+            rgb565_to_rgb888(rgb888_frame, frame->buf, static_cast<size_t>(frame->width) * frame->height, true);
+            dl::image::img_t img = {
+                .data = rgb888_frame,
+                .width = static_cast<uint16_t>(frame->width),
+                .height = static_cast<uint16_t>(frame->height),
+                .pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB888,
+            };
+
+            auto& results = detect->run(img);
+            log_raw_face_results(kRgb888BeVariant, results);
+            FaceDetectionSummary rgb888_summary;
+            has_face = has_confident_face(results,
+                                          static_cast<int>(frame->width),
+                                          static_cast<int>(frame->height),
+                                          kRgb888BeVariant,
+                                          rgb888_summary);
+            if (!has_face && !results.empty()) {
+                mclog::tagInfo(kTag,
+                               "ignored face detection: variant={}, count={}, best_score={:.2f}, box=[{},{},{},{}], side={}, keypoints={}, reason={}",
+                               rgb888_summary.variant, results.size(), rgb888_summary.best_score,
+                               rgb888_summary.best_box[0], rgb888_summary.best_box[1], rgb888_summary.best_box[2],
+                               rgb888_summary.best_box[3], rgb888_summary.best_side, rgb888_summary.best_keypoints,
+                               rgb888_summary.reject_reason);
+            }
+            if (has_face) {
+                detection_summary = rgb888_summary;
+            }
+        }
+
         if (has_face) {
             if (is_stable_face_hit(detection_summary, previous_detection)) {
                 consecutive_hits++;
@@ -585,6 +670,9 @@ static void face_detect_wakeup_task(void*)
         esp_camera_fb_return(frame);
         if (converted_frame != nullptr) {
             heap_caps_free(converted_frame);
+        }
+        if (rgb888_frame != nullptr) {
+            heap_caps_free(rgb888_frame);
         }
         vTaskDelay(pdMS_TO_TICKS(kDetectIntervalMs));
     }
