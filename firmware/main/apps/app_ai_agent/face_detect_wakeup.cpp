@@ -42,6 +42,11 @@ constexpr int kRequiredConsecutiveHits   = 5;
 constexpr int kCoreS3CameraXclkHz        = 10000000;
 constexpr const char* kEspCameraVariant  = "esp_camera_rgb565";
 constexpr const char* kSwappedVariant    = "esp_camera_rgb565_byteswapped";
+#if CONFIG_CAMERA_PSRAM_DMA
+constexpr bool kDefaultCameraPsramDma = true;
+#else
+constexpr bool kDefaultCameraPsramDma = false;
+#endif
 #if CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_RODATA
 constexpr const char* kModelStorage = "flash_rodata";
 #elif CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_PARTITION
@@ -53,6 +58,19 @@ constexpr const char* kModelStorage = "unknown";
 #endif
 
 std::atomic_bool s_started{false};
+
+static void log_camera_heap(const char* phase)
+{
+    mclog::tagInfo(kTag,
+                   "camera heap {}: dma_free={}, dma_largest={}, internal_free={}, internal_largest={}, spiram_free={}, spiram_largest={}",
+                   phase,
+                   heap_caps_get_free_size(MALLOC_CAP_DMA),
+                   heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                   heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                   heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                   heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+}
 
 static camera_config_t make_camera_config(size_t fb_count)
 {
@@ -88,15 +106,21 @@ static camera_config_t make_camera_config(size_t fb_count)
 
 static bool try_init_esp_camera(bool psram_dma, size_t fb_count)
 {
+    mclog::tagInfo(kTag,
+                   "esp_camera_init attempt: psram_dma={}, fb_count={}, fb_location=PSRAM, dma_buffer_max={}, sdkconfig_psram_dma={}",
+                   psram_dma, fb_count, CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX, kDefaultCameraPsramDma);
+    log_camera_heap("before init");
     esp_camera_set_psram_mode(psram_dma);
     camera_config_t camera_config = make_camera_config(fb_count);
     const esp_err_t err = esp_camera_init(&camera_config);
     if (err != ESP_OK) {
         mclog::tagError(kTag, "esp_camera_init failed: psram_dma={}, fb_count={}, err=0x{:X}", psram_dma,
                         fb_count, static_cast<int>(err));
+        log_camera_heap("after failed init");
         esp_camera_deinit();
         return false;
     }
+    log_camera_heap("after init");
 
     auto sensor = esp_camera_sensor_get();
     if (sensor != nullptr) {
