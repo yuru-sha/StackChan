@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -30,8 +31,7 @@
 namespace {
 
 constexpr const char* kTag               = "AI.AGENT.FaceDetect";
-constexpr uint32_t kIdlePollIntervalMs   = 1000;
-constexpr uint32_t kDetectIntervalMs     = 1500;
+constexpr uint32_t kDetectIntervalMs     = 500;
 constexpr uint32_t kWakeCooldownMs       = 10000;
 constexpr uint32_t kUnsupportedBackoffMs = 3000;
 constexpr uint32_t kStateLogIntervalMs   = 10000;
@@ -195,6 +195,14 @@ struct FaceDetectionSummary {
     int side = 0;
 };
 
+struct PreviewFaceBox {
+    int x1 = 0;
+    int y1 = 0;
+    int x2 = 0;
+    int y2 = 0;
+    bool accepted = false;
+};
+
 static bool has_confident_face(const std::list<dl::detect::result_t>& results,
                                int frame_width,
                                int frame_height,
@@ -237,6 +245,37 @@ static void swap_rgb565_bytes(uint8_t* dst, const uint8_t* src, size_t len)
     }
     if (even_len != len) {
         dst[even_len] = src[even_len];
+    }
+}
+
+static void set_rgb565_pixel(uint8_t* data, int width, int height, int x, int y, uint16_t color)
+{
+    if (x < 0 || y < 0 || x >= width || y >= height) {
+        return;
+    }
+
+    const size_t index = (static_cast<size_t>(y) * width + x) * 2;
+    data[index]        = static_cast<uint8_t>((color >> 8) & 0xFF);
+    data[index + 1]    = static_cast<uint8_t>(color & 0xFF);
+}
+
+static void draw_preview_box(uint8_t* data, int width, int height, const PreviewFaceBox& box)
+{
+    const uint16_t color = box.accepted ? 0x07E0 : 0xF800;
+    const int x1 = std::max(0, std::min(width - 1, box.x1));
+    const int y1 = std::max(0, std::min(height - 1, box.y1));
+    const int x2 = std::max(0, std::min(width - 1, box.x2));
+    const int y2 = std::max(0, std::min(height - 1, box.y2));
+
+    for (int thickness = 0; thickness < 2; ++thickness) {
+        for (int x = x1; x <= x2; ++x) {
+            set_rgb565_pixel(data, width, height, x, y1 + thickness, color);
+            set_rgb565_pixel(data, width, height, x, y2 - thickness, color);
+        }
+        for (int y = y1; y <= y2; ++y) {
+            set_rgb565_pixel(data, width, height, x1 + thickness, y, color);
+            set_rgb565_pixel(data, width, height, x2 - thickness, y, color);
+        }
     }
 }
 
@@ -289,7 +328,8 @@ static bool run_face_detection(HumanFaceDetect* detect,
                                uint8_t* data,
                                uint16_t width,
                                uint16_t height,
-                               FaceDetectionSummary& detection_summary)
+                               FaceDetectionSummary& detection_summary,
+                               std::vector<PreviewFaceBox>* preview_boxes = nullptr)
 {
     dl::image::img_t img = {
         .data = data,
@@ -301,6 +341,28 @@ static bool run_face_detection(HumanFaceDetect* detect,
     auto& results = detect->run(img);
     log_raw_face_results(variant, results);
     const bool has_face = has_confident_face(results, width, height, variant, detection_summary);
+    if (preview_boxes != nullptr) {
+        preview_boxes->clear();
+        for (const auto& result : results) {
+            if (result.box.size() < 4 || result.score < 0.80F) {
+                continue;
+            }
+            PreviewFaceBox box = {
+                .x1 = result.box[0],
+                .y1 = result.box[1],
+                .x2 = result.box[2],
+                .y2 = result.box[3],
+                .accepted = false,
+            };
+            if (has_face && box.x1 == detection_summary.accepted_box[0] &&
+                box.y1 == detection_summary.accepted_box[1] &&
+                box.x2 == detection_summary.accepted_box[2] &&
+                box.y2 == detection_summary.accepted_box[3]) {
+                box.accepted = true;
+            }
+            preview_boxes->push_back(box);
+        }
+    }
     if (!has_face && !results.empty()) {
         mclog::tagInfo(kTag,
                        "ignored face detection: variant={}, count={}, best_score={:.2f}, box=[{},{},{},{}], side={}, keypoints={}, reason={}",
@@ -312,7 +374,7 @@ static bool run_face_detection(HumanFaceDetect* detect,
     return has_face;
 }
 
-static void show_camera_preview_once(const camera_fb_t* frame)
+static void show_camera_preview(const camera_fb_t* frame, const std::vector<PreviewFaceBox>& preview_boxes)
 {
     if (frame == nullptr || frame->format != PIXFORMAT_RGB565 || frame->len == 0) {
         return;
@@ -330,7 +392,10 @@ static void show_camera_preview_once(const camera_fb_t* frame)
         return;
     }
 
-    std::memcpy(data, frame->buf, frame->len);
+    swap_rgb565_bytes(data, frame->buf, frame->len);
+    for (const auto& box : preview_boxes) {
+        draw_preview_box(data, static_cast<int>(frame->width), static_cast<int>(frame->height), box);
+    }
     auto image = std::make_unique<LvglAllocatedImage>(data,
                                                       frame->len,
                                                       static_cast<int>(frame->width),
@@ -338,7 +403,6 @@ static void show_camera_preview_once(const camera_fb_t* frame)
                                                       static_cast<int>(frame->width * 2),
                                                       LV_COLOR_FORMAT_RGB565);
     display->SetPreviewImage(std::move(image));
-    mclog::tagInfo(kTag, "showing one camera preview frame on display");
 }
 
 static bool has_confident_face(const std::list<dl::detect::result_t>& results,
@@ -434,7 +498,6 @@ static void face_detect_wakeup_task(void*)
     TickType_t last_state_log_tick = 0;
     int consecutive_hits = 0;
     bool logged_frame_info = false;
-    bool previewed_frame = false;
     bool last_ready = false;
     bool last_idle = false;
     bool has_logged_state = false;
@@ -460,14 +523,13 @@ static void face_detect_wakeup_task(void*)
             const bool should_log_periodically =
                 last_state_log_tick == 0 || (now - last_state_log_tick) >= pdMS_TO_TICKS(kStateLogIntervalMs);
             if (state_changed || should_log_periodically) {
-                mclog::tagInfo(kTag, "waiting for idle conversation: ready={}, idle={}", is_ready, is_idle);
+                mclog::tagInfo(kTag, "camera preview active, face wake waiting for idle conversation: ready={}, idle={}",
+                               is_ready, is_idle);
                 last_ready = is_ready;
                 last_idle = is_idle;
                 has_logged_state = true;
                 last_state_log_tick = now;
             }
-            vTaskDelay(pdMS_TO_TICKS(kIdlePollIntervalMs));
-            continue;
         }
 
         camera_fb_t* frame = nullptr;
@@ -487,18 +549,15 @@ static void face_detect_wakeup_task(void*)
             logged_frame_info = true;
         }
 
-        if (!previewed_frame) {
-            show_camera_preview_once(frame);
-            previewed_frame = true;
-        }
-
         FaceDetectionSummary detection_summary;
+        std::vector<PreviewFaceBox> preview_boxes;
         bool has_face = run_face_detection(detect,
                                            kEspCameraVariant,
                                            frame->buf,
                                            static_cast<uint16_t>(frame->width),
                                            static_cast<uint16_t>(frame->height),
-                                           detection_summary);
+                                           detection_summary,
+                                           &preview_boxes);
 
         uint8_t* converted_frame = nullptr;
         if (!has_face) {
@@ -632,6 +691,14 @@ static void face_detect_wakeup_task(void*)
             if (has_face) {
                 detection_summary = rgb888_summary;
             }
+        }
+
+        show_camera_preview(frame, preview_boxes);
+
+        if (!is_ready || !is_idle) {
+            consecutive_hits = 0;
+            previous_detection = {};
+            has_face = false;
         }
 
         if (has_face) {
