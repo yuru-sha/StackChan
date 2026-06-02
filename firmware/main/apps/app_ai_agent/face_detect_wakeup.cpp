@@ -9,6 +9,8 @@
 
 #if CONFIG_IDF_TARGET_ESP32S3
 
+#include <board.h>
+#include <lvgl_display.h>
 #include <hal/board/config.h>
 #include <hal/board/hal_bridge.h>
 #include <esp_camera.h>
@@ -20,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <memory>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -291,6 +294,35 @@ static bool run_face_detection(HumanFaceDetect* detect,
     return has_face;
 }
 
+static void show_camera_preview_once(const camera_fb_t* frame)
+{
+    if (frame == nullptr || frame->format != PIXFORMAT_RGB565 || frame->len == 0) {
+        return;
+    }
+
+    auto display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
+    if (display == nullptr) {
+        mclog::tagWarn(kTag, "skip camera preview because display is unavailable");
+        return;
+    }
+
+    auto data = static_cast<uint8_t*>(heap_caps_malloc(frame->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (data == nullptr) {
+        mclog::tagWarn(kTag, "failed to allocate camera preview frame");
+        return;
+    }
+
+    std::memcpy(data, frame->buf, frame->len);
+    auto image = std::make_unique<LvglAllocatedImage>(data,
+                                                      frame->len,
+                                                      static_cast<int>(frame->width),
+                                                      static_cast<int>(frame->height),
+                                                      static_cast<int>(frame->width * 2),
+                                                      LV_COLOR_FORMAT_RGB565);
+    display->SetPreviewImage(std::move(image));
+    mclog::tagInfo(kTag, "showing one camera preview frame on display");
+}
+
 static bool has_confident_face(const std::list<dl::detect::result_t>& results,
                                int frame_width,
                                int frame_height,
@@ -384,6 +416,7 @@ static void face_detect_wakeup_task(void*)
     TickType_t last_state_log_tick = 0;
     int consecutive_hits = 0;
     bool logged_frame_info = false;
+    bool previewed_frame = false;
     bool last_ready = false;
     bool last_idle = false;
     bool has_logged_state = false;
@@ -434,6 +467,11 @@ static void face_detect_wakeup_task(void*)
             mclog::tagInfo(kTag, "camera frame: {}x{}, len={}, format={}", frame->width, frame->height, frame->len,
                            static_cast<int>(frame->format));
             logged_frame_info = true;
+        }
+
+        if (!previewed_frame) {
+            show_camera_preview_once(frame);
+            previewed_frame = true;
         }
 
         FaceDetectionSummary detection_summary;
