@@ -35,6 +35,8 @@ constexpr uint32_t kDetectIntervalMs     = 500;
 constexpr uint32_t kWakeCooldownMs       = 10000;
 constexpr uint32_t kUnsupportedBackoffMs = 3000;
 constexpr uint32_t kStateLogIntervalMs   = 10000;
+constexpr uint32_t kRawResultLogIntervalMs = 5000;
+constexpr bool kEnableProbeVariants      = false;
 constexpr float kWakeScoreThreshold      = 0.97F;
 constexpr int kMinFaceSidePx             = 80;
 constexpr int kMaxFaceSidePx             = 220;
@@ -201,6 +203,7 @@ struct PreviewFaceBox {
     int x2 = 0;
     int y2 = 0;
     bool accepted = false;
+    std::vector<int> keypoints;
 };
 
 static bool has_confident_face(const std::list<dl::detect::result_t>& results,
@@ -261,7 +264,7 @@ static void set_rgb565_pixel(uint8_t* data, int width, int height, int x, int y,
 
 static void draw_preview_box(uint8_t* data, int width, int height, const PreviewFaceBox& box)
 {
-    const uint16_t color = box.accepted ? 0x07E0 : 0xF800;
+    const uint16_t color = box.accepted ? 0x07E0 : 0x001F;
     const int x1 = std::max(0, std::min(width - 1, box.x1));
     const int y1 = std::max(0, std::min(height - 1, box.y1));
     const int x2 = std::max(0, std::min(width - 1, box.x2));
@@ -275,6 +278,18 @@ static void draw_preview_box(uint8_t* data, int width, int height, const Preview
         for (int y = y1; y <= y2; ++y) {
             set_rgb565_pixel(data, width, height, x1 + thickness, y, color);
             set_rgb565_pixel(data, width, height, x2 - thickness, y, color);
+        }
+    }
+
+    const uint16_t keypoint_color = 0x07E0;
+    for (size_t i = 0; i + 1 < box.keypoints.size(); i += 2) {
+        const int x = box.keypoints[i];
+        const int y = box.keypoints[i + 1];
+        for (int dy = -2; dy <= 2; ++dy) {
+            set_rgb565_pixel(data, width, height, x, y + dy, keypoint_color);
+        }
+        for (int dx = -2; dx <= 2; ++dx) {
+            set_rgb565_pixel(data, width, height, x + dx, y, keypoint_color);
         }
     }
 }
@@ -329,7 +344,8 @@ static bool run_face_detection(HumanFaceDetect* detect,
                                uint16_t width,
                                uint16_t height,
                                FaceDetectionSummary& detection_summary,
-                               std::vector<PreviewFaceBox>* preview_boxes = nullptr)
+                               std::vector<PreviewFaceBox>* preview_boxes = nullptr,
+                               bool log_results = true)
 {
     dl::image::img_t img = {
         .data = data,
@@ -339,7 +355,9 @@ static bool run_face_detection(HumanFaceDetect* detect,
     };
 
     auto& results = detect->run(img);
-    log_raw_face_results(variant, results);
+    if (log_results) {
+        log_raw_face_results(variant, results);
+    }
     const bool has_face = has_confident_face(results, width, height, variant, detection_summary);
     if (preview_boxes != nullptr) {
         preview_boxes->clear();
@@ -354,6 +372,7 @@ static bool run_face_detection(HumanFaceDetect* detect,
                 .y2 = result.box[3],
                 .accepted = false,
             };
+            box.keypoints.assign(result.keypoint.begin(), result.keypoint.end());
             if (has_face && box.x1 == detection_summary.accepted_box[0] &&
                 box.y1 == detection_summary.accepted_box[1] &&
                 box.x2 == detection_summary.accepted_box[2] &&
@@ -363,7 +382,7 @@ static bool run_face_detection(HumanFaceDetect* detect,
             preview_boxes->push_back(box);
         }
     }
-    if (!has_face && !results.empty()) {
+    if (log_results && !has_face && !results.empty()) {
         mclog::tagInfo(kTag,
                        "ignored face detection: variant={}, count={}, best_score={:.2f}, box=[{},{},{},{}], side={}, keypoints={}, reason={}",
                        detection_summary.variant, results.size(), detection_summary.best_score,
@@ -496,6 +515,7 @@ static void face_detect_wakeup_task(void*)
                    CONFIG_HUMAN_FACE_DETECT_MODEL_LOCATION);
     TickType_t last_wake_tick = 0;
     TickType_t last_state_log_tick = 0;
+    TickType_t last_raw_log_tick = 0;
     int consecutive_hits = 0;
     bool logged_frame_info = false;
     bool last_ready = false;
@@ -551,16 +571,23 @@ static void face_detect_wakeup_task(void*)
 
         FaceDetectionSummary detection_summary;
         std::vector<PreviewFaceBox> preview_boxes;
+        const TickType_t now = xTaskGetTickCount();
+        const bool should_log_raw = last_raw_log_tick == 0 ||
+                                    (now - last_raw_log_tick) >= pdMS_TO_TICKS(kRawResultLogIntervalMs);
         bool has_face = run_face_detection(detect,
                                            kEspCameraVariant,
                                            frame->buf,
                                            static_cast<uint16_t>(frame->width),
                                            static_cast<uint16_t>(frame->height),
                                            detection_summary,
-                                           &preview_boxes);
+                                           &preview_boxes,
+                                           should_log_raw);
+        if (should_log_raw) {
+            last_raw_log_tick = now;
+        }
 
         uint8_t* converted_frame = nullptr;
-        if (!has_face) {
+        if (kEnableProbeVariants && !has_face) {
             converted_frame = static_cast<uint8_t*>(heap_caps_malloc(frame->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             if (converted_frame == nullptr) {
                 mclog::tagWarn(kTag, "failed to allocate converted RGB565 frame");
@@ -627,7 +654,7 @@ static void face_detect_wakeup_task(void*)
         }
 
         uint8_t* rgb888_frame = nullptr;
-        if (!has_face) {
+        if (kEnableProbeVariants && !has_face) {
             const size_t rgb888_len = static_cast<size_t>(frame->width) * frame->height * 3;
             rgb888_frame = static_cast<uint8_t*>(heap_caps_malloc(rgb888_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             if (rgb888_frame == nullptr) {
