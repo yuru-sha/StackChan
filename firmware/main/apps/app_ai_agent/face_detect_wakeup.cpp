@@ -43,6 +43,9 @@ constexpr int kRequiredConsecutiveHits   = 5;
 constexpr int kCoreS3CameraXclkHz        = 10000000;
 constexpr const char* kEspCameraVariant  = "esp_camera_rgb565";
 constexpr const char* kSwappedVariant    = "esp_camera_rgb565_byteswapped";
+constexpr const char* kSwappedDimsVariant = "esp_camera_rgb565_swapped_dims";
+constexpr const char* kRotCwVariant      = "esp_camera_rgb565_rot90_cw";
+constexpr const char* kRotCcwVariant     = "esp_camera_rgb565_rot90_ccw";
 #if CONFIG_CAMERA_PSRAM_DMA
 constexpr bool kDefaultCameraPsramDma = true;
 #else
@@ -232,6 +235,34 @@ static void swap_rgb565_bytes(uint8_t* dst, const uint8_t* src, size_t len)
     }
 }
 
+static void rotate_rgb565_90_cw(uint8_t* dst, const uint8_t* src, uint16_t src_width, uint16_t src_height)
+{
+    for (uint16_t y = 0; y < src_height; ++y) {
+        for (uint16_t x = 0; x < src_width; ++x) {
+            const size_t src_index = (static_cast<size_t>(y) * src_width + x) * 2;
+            const uint16_t dst_x   = src_height - 1 - y;
+            const uint16_t dst_y   = x;
+            const size_t dst_index = (static_cast<size_t>(dst_y) * src_height + dst_x) * 2;
+            dst[dst_index]         = src[src_index];
+            dst[dst_index + 1]     = src[src_index + 1];
+        }
+    }
+}
+
+static void rotate_rgb565_90_ccw(uint8_t* dst, const uint8_t* src, uint16_t src_width, uint16_t src_height)
+{
+    for (uint16_t y = 0; y < src_height; ++y) {
+        for (uint16_t x = 0; x < src_width; ++x) {
+            const size_t src_index = (static_cast<size_t>(y) * src_width + x) * 2;
+            const uint16_t dst_x   = y;
+            const uint16_t dst_y   = src_width - 1 - x;
+            const size_t dst_index = (static_cast<size_t>(dst_y) * src_height + dst_x) * 2;
+            dst[dst_index]         = src[src_index];
+            dst[dst_index + 1]     = src[src_index + 1];
+        }
+    }
+}
+
 static bool run_face_detection(HumanFaceDetect* detect,
                                const char* variant,
                                uint8_t* data,
@@ -413,23 +444,70 @@ static void face_detect_wakeup_task(void*)
                                            static_cast<uint16_t>(frame->height),
                                            detection_summary);
 
-        uint8_t* swapped_frame = nullptr;
+        uint8_t* converted_frame = nullptr;
         if (!has_face) {
-            swapped_frame = static_cast<uint8_t*>(heap_caps_malloc(frame->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-            if (swapped_frame == nullptr) {
-                mclog::tagWarn(kTag, "failed to allocate byte-swapped RGB565 frame");
+            converted_frame = static_cast<uint8_t*>(heap_caps_malloc(frame->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (converted_frame == nullptr) {
+                mclog::tagWarn(kTag, "failed to allocate converted RGB565 frame");
             } else {
-                swap_rgb565_bytes(swapped_frame, frame->buf, frame->len);
+                swap_rgb565_bytes(converted_frame, frame->buf, frame->len);
                 FaceDetectionSummary swapped_summary;
                 has_face = run_face_detection(detect,
                                               kSwappedVariant,
-                                              swapped_frame,
+                                              converted_frame,
                                               static_cast<uint16_t>(frame->width),
                                               static_cast<uint16_t>(frame->height),
                                               swapped_summary);
                 if (has_face) {
                     detection_summary = swapped_summary;
                 }
+            }
+        }
+
+        if (!has_face && converted_frame != nullptr && frame->width == 320 && frame->height == 240) {
+            FaceDetectionSummary swapped_dims_summary;
+            has_face = run_face_detection(detect,
+                                          kSwappedDimsVariant,
+                                          frame->buf,
+                                          static_cast<uint16_t>(frame->height),
+                                          static_cast<uint16_t>(frame->width),
+                                          swapped_dims_summary);
+            if (has_face) {
+                detection_summary = swapped_dims_summary;
+            }
+        }
+
+        if (!has_face && converted_frame != nullptr && frame->width == 320 && frame->height == 240) {
+            rotate_rgb565_90_cw(converted_frame,
+                                frame->buf,
+                                static_cast<uint16_t>(frame->width),
+                                static_cast<uint16_t>(frame->height));
+            FaceDetectionSummary rot_cw_summary;
+            has_face = run_face_detection(detect,
+                                          kRotCwVariant,
+                                          converted_frame,
+                                          static_cast<uint16_t>(frame->height),
+                                          static_cast<uint16_t>(frame->width),
+                                          rot_cw_summary);
+            if (has_face) {
+                detection_summary = rot_cw_summary;
+            }
+        }
+
+        if (!has_face && converted_frame != nullptr && frame->width == 320 && frame->height == 240) {
+            rotate_rgb565_90_ccw(converted_frame,
+                                 frame->buf,
+                                 static_cast<uint16_t>(frame->width),
+                                 static_cast<uint16_t>(frame->height));
+            FaceDetectionSummary rot_ccw_summary;
+            has_face = run_face_detection(detect,
+                                          kRotCcwVariant,
+                                          converted_frame,
+                                          static_cast<uint16_t>(frame->height),
+                                          static_cast<uint16_t>(frame->width),
+                                          rot_ccw_summary);
+            if (has_face) {
+                detection_summary = rot_ccw_summary;
             }
         }
 
@@ -467,8 +545,8 @@ static void face_detect_wakeup_task(void*)
         }
 
         esp_camera_fb_return(frame);
-        if (swapped_frame != nullptr) {
-            heap_caps_free(swapped_frame);
+        if (converted_frame != nullptr) {
+            heap_caps_free(converted_frame);
         }
         vTaskDelay(pdMS_TO_TICKS(kDetectIntervalMs));
     }
