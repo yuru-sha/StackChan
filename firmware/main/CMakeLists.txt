@@ -1,10 +1,19 @@
 # Define xiaozhi source directory
 set(XIAOZHI_MAIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../xiaozhi-esp32/main")
 
+if(CONFIG_IDF_TARGET_ESP32S3)
+    idf_component_register(SRCS "main.cpp" "log_wrap_shim.c"
+        INCLUDE_DIRS "."
+        WHOLE_ARCHIVE
+        REQUIRES
+            human_face_detect
+            m5stack_core_s3_noglib
+            m5unified
+    )
+    return()
+endif()
+
 file(GLOB_RECURSE STACK_CHAN_SOURCES
-    "apps/*.c"
-    "apps/*.cc"
-    "apps/*.cpp"
     "assets/*.c"
     "assets/*.cc"
     "assets/*.cpp"
@@ -14,6 +23,30 @@ file(GLOB_RECURSE STACK_CHAN_SOURCES
     "stackchan/*.c"
     "stackchan/*.cc"
     "stackchan/*.cpp"
+)
+list(FILTER STACK_CHAN_SOURCES EXCLUDE REGEX ".*/stackchan/avatar/.*")
+list(FILTER STACK_CHAN_SOURCES EXCLUDE REGEX ".*/stackchan/animation/.*")
+list(FILTER STACK_CHAN_SOURCES EXCLUDE REGEX ".*/stackchan/motion/.*")
+list(FILTER STACK_CHAN_SOURCES EXCLUDE REGEX ".*/stackchan/addons/.*")
+list(FILTER STACK_CHAN_SOURCES EXCLUDE REGEX ".*/stackchan/stackchan\\.cpp$")
+list(FILTER STACK_CHAN_SOURCES EXCLUDE REGEX ".*/stackchan/json/.*")
+list(FILTER STACK_CHAN_SOURCES EXCLUDE REGEX ".*/hal/drivers/FTServo_Arduino/.*")
+list(FILTER STACK_CHAN_SOURCES EXCLUDE REGEX ".*/hal/drivers/bmi270/.*")
+list(FILTER STACK_CHAN_SOURCES EXCLUDE REGEX ".*/hal/drivers/Si12T/.*")
+list(APPEND STACK_CHAN_SOURCES
+    "apps/app_ai_agent/face_detect_wakeup.cpp"
+)
+list(REMOVE_ITEM STACK_CHAN_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_account.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_app_center.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_ble.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_espnow.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_ezdata.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_head_touch.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_imu.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_ota.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_servo.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_ws_avatar.cpp"
 )
 set(STACK_CHAN_INCLUDE_DIRS 
     "."
@@ -291,7 +324,7 @@ endif()
 
 set(STACK_CHAN_OPTIONAL_PRIV_REQUIRES)
 if(CONFIG_IDF_TARGET_ESP32S3)
-    list(APPEND STACK_CHAN_OPTIONAL_PRIV_REQUIRES human_face_detect)
+    list(APPEND STACK_CHAN_OPTIONAL_PRIV_REQUIRES human_face_detect m5stack_core_s3_noglib m5unified)
 endif()
 
 idf_component_register(SRCS ${SOURCES}

@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
-#include <stackchan/stackchan.h>
 #include <mooncake.h>
 #include <mooncake_log.h>
 #include <wifi_manager.h>

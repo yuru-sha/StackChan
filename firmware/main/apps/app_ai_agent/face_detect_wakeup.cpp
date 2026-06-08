@@ -11,6 +11,7 @@
 
 #include <board.h>
 #include <lvgl_display.h>
+#include <bsp/esp-bsp.h>
 #include <hal/board/config.h>
 #include <hal/board/hal_bridge.h>
 #include <esp_camera.h>
@@ -44,7 +45,6 @@ constexpr int kMaxStableCenterShiftPx    = 32;
 constexpr int kMaxStableSideShiftPx      = 35;
 constexpr int kRequiredLandmarkValues    = 10;
 constexpr int kRequiredConsecutiveHits   = 5;
-constexpr int kCoreS3CameraXclkHz        = 10000000;
 constexpr const char* kEspCameraVariant  = "esp_camera_rgb565";
 #if CONFIG_CAMERA_PSRAM_DMA
 constexpr bool kDefaultCameraPsramDma = true;
@@ -62,6 +62,7 @@ constexpr const char* kModelStorage = "unknown";
 #endif
 
 std::atomic_bool s_started{false};
+volatile uint16_t s_frame_read_sink = 0;
 
 class LcdBusQuietGuard {
 public:
@@ -108,34 +109,28 @@ static void log_camera_heap(const char* phase)
 
 static camera_config_t make_camera_config(size_t fb_count)
 {
-    return camera_config_t{
-        .pin_pwdn = CAMERA_PIN_PWDN,
-        .pin_reset = CAMERA_PIN_RESET,
-        .pin_xclk = CAMERA_PIN_XCLK,
-        .pin_sccb_sda = -1,
-        .pin_sccb_scl = -1,
-        .pin_d7 = CAMERA_PIN_D7,
-        .pin_d6 = CAMERA_PIN_D6,
-        .pin_d5 = CAMERA_PIN_D5,
-        .pin_d4 = CAMERA_PIN_D4,
-        .pin_d3 = CAMERA_PIN_D3,
-        .pin_d2 = CAMERA_PIN_D2,
-        .pin_d1 = CAMERA_PIN_D1,
-        .pin_d0 = CAMERA_PIN_D0,
-        .pin_vsync = CAMERA_PIN_VSYNC,
-        .pin_href = CAMERA_PIN_HREF,
-        .pin_pclk = CAMERA_PIN_PCLK,
-        .xclk_freq_hz = kCoreS3CameraXclkHz,
-        .ledc_timer = LEDC_TIMER_0,
-        .ledc_channel = LEDC_CHANNEL_0,
-        .pixel_format = PIXFORMAT_RGB565,
-        .frame_size = FRAMESIZE_QVGA,
-        .jpeg_quality = 12,
-        .fb_count = fb_count,
-        .fb_location = CAMERA_FB_IN_PSRAM,
-        .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
-        .sccb_i2c_port = 1,
-    };
+    camera_config_t camera_config_for_core_s3 = BSP_CAMERA_DEFAULT_CONFIG;
+    camera_config_for_core_s3.pixel_format = PIXFORMAT_RGB565;
+    camera_config_for_core_s3.frame_size = FRAMESIZE_QVGA;
+    camera_config_for_core_s3.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+    camera_config_for_core_s3.fb_count = fb_count;
+    camera_config_for_core_s3.fb_location = CAMERA_FB_IN_PSRAM;
+    return camera_config_for_core_s3;
+}
+
+static void warm_camera_frame_for_inference(const camera_fb_t* frame)
+{
+    if (frame == nullptr || frame->buf == nullptr) {
+        return;
+    }
+
+    auto pixels = reinterpret_cast<volatile const uint16_t*>(frame->buf);
+    const size_t pixel_count = frame->len / sizeof(uint16_t);
+    uint16_t checksum = 0;
+    for (size_t i = 0; i < pixel_count; ++i) {
+        checksum ^= pixels[i];
+    }
+    s_frame_read_sink = checksum;
 }
 
 static bool try_init_esp_camera(bool psram_dma, size_t fb_count)
@@ -154,10 +149,15 @@ static bool try_init_esp_camera(bool psram_dma, size_t fb_count)
         esp_camera_deinit();
         return false;
     }
+    sensor_t* sensor = esp_camera_sensor_get();
+    if (sensor != nullptr) {
+        sensor->set_vflip(sensor, BSP_CAMERA_VFLIP);
+        sensor->set_hmirror(sensor, BSP_CAMERA_HMIRROR);
+    }
     log_camera_heap("after init");
 
     mclog::tagInfo(kTag, "esp_camera initialized: RGB565 QVGA, xclk={}Hz, psram_dma={}, fb_count={}",
-                   kCoreS3CameraXclkHz, psram_dma, fb_count);
+                   camera_config.xclk_freq_hz, psram_dma, fb_count);
     return true;
 }
 
@@ -516,6 +516,7 @@ static void face_detect_wakeup_task(void*)
                            static_cast<int>(frame->format));
             logged_frame_info = true;
         }
+        warm_camera_frame_for_inference(frame);
 
         FaceDetectionSummary detection_summary;
         std::vector<PreviewFaceBox> preview_boxes;
@@ -591,7 +592,7 @@ void start_face_detect_wakeup()
         return;
     }
 
-    BaseType_t ok = xTaskCreatePinnedToCore(face_detect_wakeup_task, "face_detect_wakeup", 8192, nullptr, 2, nullptr, 1);
+    BaseType_t ok = xTaskCreatePinnedToCore(face_detect_wakeup_task, "face_detect_wakeup", 16384, nullptr, 3, nullptr, 1);
     if (ok != pdPASS) {
         s_started.store(false);
         mclog::tagError(kTag, "failed to start face detect wakeup task");

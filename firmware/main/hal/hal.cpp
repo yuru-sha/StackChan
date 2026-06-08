@@ -33,12 +33,8 @@ void Hal::init()
     ESP_ERROR_CHECK(ret);
 
     xiaozhi_board_init();
-    xiaozhi_mcp_init();
-    head_touch_init();
     io_expander_init();
     rtc_init();
-    imu_init();
-    servo_init();
     lvgl_init();
 }
 
@@ -131,9 +127,6 @@ void Hal::updateHeapStatusLog()
 /*                                   Xiaozhi                                  */
 /* -------------------------------------------------------------------------- */
 #include "board/hal_bridge.h"
-#include <stackchan/stackchan.h>
-#include <apps/common/common.h>
-#include <assets/assets.h>
 
 void Hal::xiaozhi_board_init()
 {
@@ -142,62 +135,9 @@ void Hal::xiaozhi_board_init()
     hal_bridge::xiaozhi_board_init();
 }
 
-static void _stackchan_update_task(void* param)
-{
-    bool is_setup_done = false;
-
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-
-        tools::update_reminders();
-
-        LvglLockGuard lock;
-
-        if (!hal_bridge::is_xiaozhi_idle()) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-
-        GetStackChan().update();
-
-        if (!hal_bridge::is_xiaozhi_ready()) {
-            continue;
-        }
-
-        if (!is_setup_done) {
-            // Setup when xiaozhi ready
-            GetHAL().startSntp();
-            view::create_home_indicator([]() { GetHAL().requestWarmReboot(0); }, 0x81DBBD, 0x134233);
-            view::create_status_bar(0x81DBBD, 0x134233);
-            is_setup_done = true;
-        }
-
-        view::update_home_indicator();
-        view::update_status_bar();
-    }
-}
-
 void Hal::startXiaozhi()
 {
     mclog::tagInfo(_tag, "start xiaozhi");
-
-    auto& motion = GetStackChan().motion();
-    motion.setAutoAngleSyncEnabled(true);
-    motion.setAutoTorqueReleaseEnabled(true);
-
-    // Setup reminder handler
-    tools::on_reminder_triggered().clear();
-    tools::on_reminder_triggered().connect([](int id, std::string_view msg) {
-        mclog::tagInfo(_tag, "reminder triggered: id: {}, msg: {}", id, msg);
-        {
-            LvglLockGuard lock;
-            auto& avatar = GetStackChan().avatar();
-            avatar.addDecorator(std::make_unique<view::ReminderView>(lv_screen_active(), msg));
-        }
-        hal_bridge::app_play_sound(OGG_NEW_NOTIFICATION);
-    });
-
-    // Start stackchan update task
-    xTaskCreatePinnedToCore(_stackchan_update_task, "stackchan", 4096, NULL, 3, NULL, 1);
 
     hal_bridge::start_xiaozhi_app();
 }
@@ -277,7 +217,6 @@ uint8_t Hal::getSpeakerVolume()
 /*                                    Lvgl                                    */
 /* -------------------------------------------------------------------------- */
 #include "board/hal_bridge.h"
-#include <stackchan/stackchan.h>
 
 static void lvgl_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
 {

@@ -14,12 +14,8 @@
 #include <settings.h>
 #include <lvgl.h>
 #include <lvgl_theme.h>
-#include <stackchan/stackchan.h>
 #include <assets/lang_config.h>
 #include <hal/hal.h>
-
-using namespace stackchan;
-using namespace stackchan::avatar;
 
 #define TAG "StackChanAvatarDisplay"
 
@@ -207,10 +203,6 @@ StackChanAvatarDisplay::~StackChanAvatarDisplay()
         lv_obj_del(preview_image_);
     }
 
-    auto& stackchan = GetStackChan();
-    if (stackchan.hasAvatar()) {
-        stackchan.resetAvatar();
-    }
 }
 
 bool StackChanAvatarDisplay::Lock(int timeout_ms)
@@ -240,42 +232,14 @@ void StackChanAvatarDisplay::SetupUI()
 
     Display::SetupUI();  // Mark SetupUI as called
 
-    auto& stackchan = GetStackChan();
-
-    if (stackchan.hasAvatar()) {
-        ESP_LOGW(TAG, "Avatar already created");
-        return;
-    }
-
     DisplayLockGuard lock(this);
 
-    ESP_LOGI(TAG, "Creating Stack-chan Avatar...");
-
-    auto avatar = std::make_unique<DefaultAvatar>();
-    avatar->init(lv_screen_active());
-    avatar->getPanel()->onClick().connect([]() {
-        if (hal_bridge::is_xiaozhi_ready()) {
-            hal_bridge::toggle_xiaozhi_chat_state();
-        }
-    });
-
-    stackchan.attachAvatar(std::move(avatar));
-    stackchan.addModifier(std::make_unique<BreathModifier>());
-    blink_modifier_id_ = stackchan.addModifier(std::make_unique<BlinkModifier>());
-    stackchan.addModifier(std::make_unique<HeadPetModifier>());
-    stackchan.addModifier(std::make_unique<ImuEventModifier>());
+    ESP_LOGI(TAG, "Creating camera preview surface without avatar");
 
     preview_image_ = lv_image_create(lv_screen_active());
     lv_obj_set_size(preview_image_, 320, 240);
     lv_obj_align(preview_image_, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
-
-    // GetHAL().startStackChanAutoUpdate(24);
-
-    auto config        = hal_bridge::get_xiaozhi_config();
-    idle_motion_level_ = config.idleRandomMovementLevel;
-
-    ESP_LOGI(TAG, "Avatar created and started");
 }
 
 void StackChanAvatarDisplay::LvglLock()
@@ -292,126 +256,28 @@ void StackChanAvatarDisplay::LvglUnlock()
 
 void StackChanAvatarDisplay::CreateIdleMotionModifier()
 {
-    auto& stackchan = GetStackChan();
-
-    switch (idle_motion_level_) {
-        case 0:
-            idle_motion_modifier_id_ = -1;
-            return;
-        case 1:
-            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(8000, 12000));
-            return;
-        case 3:
-            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(2000, 4000));
-            return;
-        case 2:
-        default:
-            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>());
-            return;
-    }
 }
 
 void StackChanAvatarDisplay::SetEmotion(const char* emotion)
 {
-    auto& stackchan = GetStackChan();
-
-    if (!stackchan.hasAvatar() || !emotion) {
-        return;
-    }
-
-    DisplayLockGuard lock(this);
-
-    // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
-
-    auto& avatar = stackchan.avatar();
-
-    // Map emotion string to stackchan::Emotion
-    if (strcmp(emotion, "neutral") == 0) {
-        avatar.setEmotion(Emotion::Neutral);
-    } else if (strcmp(emotion, "happy") == 0) {
-        avatar.setEmotion(Emotion::Happy);
-    } else if (strcmp(emotion, "laughing") == 0) {
-        avatar.setEmotion(Emotion::Happy);
-    } else if (strcmp(emotion, "angry") == 0) {
-        avatar.setEmotion(Emotion::Angry);
-    } else if (strcmp(emotion, "sad") == 0) {
-        avatar.setEmotion(Emotion::Sad);
-    } else if (strcmp(emotion, "crying") == 0) {
-        avatar.setEmotion(Emotion::Sad);
-    } else if (strcmp(emotion, "sleepy") == 0) {
-        avatar.setEmotion(Emotion::Sleepy);
-        avatar.setSpeech("Zzz…");
-        is_sleeping_ = true;
-        // avatar.mouth().setWeight(10);
-
-        // Stop idle motion
-        ESP_LOGW(TAG, "Stop idle motion");
-        if (idle_motion_modifier_id_ >= 0) {
-            stackchan.removeModifier(idle_motion_modifier_id_);
-            idle_motion_modifier_id_ = -1;
-            stackchan.removeModifier(idle_expression_modifier_id_);
-            idle_expression_modifier_id_ = -1;
-        }
-
-        // Return to default pose
-        auto& motion = GetStackChan().motion();
-        motion.pitchServo().moveWithSpeed(0, 80);
-
-    } else if (strcmp(emotion, "doubtful") == 0) {
-        avatar.setEmotion(Emotion::Doubt);
-    } else {
-        ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
-        avatar.setEmotion(Emotion::Neutral);
-    }
-
-    // Resync blink modifier base eye weights
-    auto blink_modifier = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_));
-    if (blink_modifier) {
-        blink_modifier->resyncEyeWeights();
-    }
 }
 
 void StackChanAvatarDisplay::SetChatMessage(const char* role, const char* content)
 {
-    if (!setup_ui_called_) {
-        ESP_LOGW(TAG, "SetChatMessage('%s', '%s') called before SetupUI() - message will be lost!", role, content);
-    }
-
-    auto& stackchan = GetStackChan();
-    if (!stackchan.hasAvatar()) {
-        return;
-    }
-
-    // ESP_LOGE(TAG, "SetChatMessage: role=%s, content=%s", role ? role : "null", content ? content : "null");
-
-    DisplayLockGuard lock(this);
-
-    if (strcmp(role, "system") == 0) {
-        stackchan.avatar().setSpeech(content);
-    } else if (strcmp(role, "assistant") == 0) {
-        stackchan.avatar().setSpeech(content);
-    }
 }
 
 void StackChanAvatarDisplay::ClearChatMessages()
 {
-    auto& stackchan = GetStackChan();
-    if (!stackchan.hasAvatar()) {
-        return;
-    }
-
-    DisplayLockGuard lock(this);
-
-    stackchan.avatar().clearSpeech();
-
-    ESP_LOGI(TAG, "Chat messages cleared");
 }
 
 void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
 {
     DisplayLockGuard lock(this);
     if (preview_image_ == nullptr) {
-        return;
+        preview_image_ = lv_image_create(lv_screen_active());
+        lv_obj_set_size(preview_image_, 320, 240);
+        lv_obj_align(preview_image_, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (image == nullptr) {
@@ -442,20 +308,7 @@ void StackChanAvatarDisplay::UpdateStatusBar(bool update_all)
 
 void StackChanAvatarDisplay::SetTheme(Theme* theme)
 {
-    ESP_LOGI(TAG, "SetTheme: %s", theme->name().c_str());
-
-    auto& stackchan = GetStackChan();
-    if (!stackchan.hasAvatar()) {
-        ESP_LOGE(TAG, "Avatar is invalid");
-        return;
-    }
-
-    DisplayLockGuard lock(this);
-
-    auto lvgl_theme = static_cast<LvglTheme*>(theme);
-    auto text_font  = lvgl_theme->text_font()->font();
-
-    stackchan.avatar().setSpeechTextFont((void*)text_font);
+    current_theme_ = static_cast<LvglTheme*>(theme);
 }
 
 #include <hal/board/hal_bridge.h>
@@ -474,40 +327,14 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 {
     // ESP_LOGE(TAG, "SetStatus: %s", status);
 
-    auto& stackchan = GetStackChan();
-    if (!stackchan.hasAvatar()) {
-        ESP_LOGE(TAG, "Avatar is invalid");
-        return;
-    }
-
-    auto& avatar = stackchan.avatar();
-    auto& motion = stackchan.motion();
-
-    DisplayLockGuard lock(this);
-
-    bool is_idle      = false;
-    bool is_listening = false;
+    bool is_idle = false;
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
-        if (speaking_modifier_id_ >= 0) {
-            // Start speaking
-            stackchan.removeModifier(speaking_modifier_id_);
-            avatar.mouth().setWeight(0);
-            speaking_modifier_id_ = -1;
-        }
-
         GetHAL().setRgbColor(0, 0, 50, 0);
         GetHAL().refreshRgb();
 
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
         _is_xiaozhi_ready = true;
-
-        if (speaking_modifier_id_ >= 0) {
-            // Stop speaking
-            stackchan.removeModifier(speaking_modifier_id_);
-            avatar.mouth().setWeight(0);
-            speaking_modifier_id_ = -1;
-        }
 
         is_idle = true;
 
@@ -515,49 +342,14 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         GetHAL().refreshRgb();
 
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
-        if (speaking_modifier_id_ < 0) {
-            speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, false));
-        }
-
         GetHAL().setRgbColor(0, 0, 0, 50);
         GetHAL().refreshRgb();
-    } else {
-        avatar.setSpeech(status);
     }
 
     if (is_idle) {
-        // Start idle motion
-        ESP_LOGW(TAG, "Start idle motion");
-        if (idle_motion_modifier_id_ < 0) {
-            if (idle_motion_level_ > 0) {
-                CreateIdleMotionModifier();
-            }
-            idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
-        }
-
         _is_xiaozhi_idle = true;
     } else {
-        // Stop idle motion
-        ESP_LOGW(TAG, "Stop idle motion");
-        if (idle_motion_modifier_id_ >= 0) {
-            stackchan.removeModifier(idle_motion_modifier_id_);
-            idle_motion_modifier_id_ = -1;
-            stackchan.removeModifier(idle_expression_modifier_id_);
-            idle_expression_modifier_id_ = -1;
-        }
-
-        // if (!is_listening) {
-        //     // Return to default pose
-        //     motion.pitchServo().moveWithSpeed(200, 350);
-        //     motion.yawServo().moveWithSpeed(0, 350);
-        // }
-
         _is_xiaozhi_idle = false;
-    }
-
-    // Clear sleep state
-    if (is_sleeping_) {
-        avatar.setSpeech("");
     }
 }
 
