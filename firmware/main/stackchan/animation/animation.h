@@ -23,7 +23,7 @@ struct FeatureKeyframe {
     int size;
 
     FeatureKeyframe(int x = 0, int y = 0, int rotation = 0, int weight = 0)
-        : position(x, y), rotation(rotation), weight(weight)
+        : position(x, y), rotation(rotation), weight(weight), size(0)
     {
     }
 };
