@@ -55,6 +55,7 @@ jobs:
           git push --force origin HEAD:refs/heads/automation/sync-upstream-main
 
           pr_number="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
             --state open \
             --base custom/main \
             --head "$GITHUB_REPOSITORY_OWNER:automation/sync-upstream-main" \
@@ -63,6 +64,7 @@ jobs:
 
           if [ -z "$pr_number" ]; then
             gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
               --base custom/main \
               --head automation/sync-upstream-main \
               --title "Sync upstream main" \
