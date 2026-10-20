@@ -1,0 +1,76 @@
+name: Sync upstream main
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out custom/main
+        uses: actions/checkout@v6
+        with:
+          ref: custom/main
+          fetch-depth: 0
+
+      - name: Fetch upstream main
+        run: |
+          git remote add upstream https://github.com/m5stack/StackChan.git
+          git fetch upstream main:refs/remotes/upstream/main
+
+      - name: Configure merge identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Check whether upstream is already included
+        id: upstream-status
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "already_included=true" >> "$GITHUB_OUTPUT"
+            echo "upstream/main is already included in custom/main."
+          else
+            echo "already_included=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream history
+        if: steps.upstream-status.outputs.already_included != 'true'
+        run: git merge --no-ff --no-edit upstream/main
+
+      - name: Publish sync branch and create or update pull request
+        if: steps.upstream-status.outputs.already_included != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push --force origin HEAD:refs/heads/automation/sync-upstream-main
+
+          pr_number="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --base custom/main \
+            --head "$GITHUB_REPOSITORY_OWNER:automation/sync-upstream-main" \
+            --json number \
+            --jq '.[0].number')"
+
+          if [ -z "$pr_number" ]; then
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base custom/main \
+              --head automation/sync-upstream-main \
+              --title "Sync upstream main" \
+              --body "Updates \`custom/main\` with changes from \`m5stack/StackChan:main\`.\n\nReview and merge this PR manually using a merge commit (not squash/rebase) to preserve upstream ancestry. Resolve any conflicts before rerunning the workflow."
+          else
+            echo "Updated existing sync PR #${pr_number}."
+          fi
+
+
